@@ -37,9 +37,9 @@ func (engine *ClaudeEngine) Review(ctx context.Context, request Request) ([]byte
 
 	// The selected CLI owns native policy and authentication enforcement. Roast
 	// deliberately keeps the user's existing login and environment unchanged.
-	// Empty setting sources intentionally exclude user auth helpers as well;
-	// copying or selectively reconstructing them would violate the adapter
-	// contract's no-auth-staging boundary.
+	// `--safe-mode` disables CLAUDE.md discovery, while empty setting sources
+	// exclude user auth helpers as well; copying or selectively reconstructing
+	// them would violate the adapter contract's no-auth-staging boundary.
 	call := func(ctx context.Context, prompt string) ([]byte, error) {
 		result, runErr := runCommandWithHeartbeat(
 			ctx,
@@ -48,6 +48,7 @@ func (engine *ClaudeEngine) Review(ctx context.Context, request Request) ([]byte
 			prompt,
 			request.SnapshotDir,
 			engine.options.Binary,
+			nil,
 			engine.arguments(request.SnapshotDir)...,
 		)
 		if commandErr := commandError(ctx, EngineClaude, engine.options.Binary, result, runErr); commandErr != nil {
