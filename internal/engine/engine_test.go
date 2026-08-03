@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -213,7 +214,9 @@ func TestStageCodexHomeCopiesOnlyAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Windows does not expose ACLs through FileMode.Perm; the chmod call is
+	// still exercised there, but the Unix permission-bit assertion is not.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("staged auth permissions = %o, want 600", info.Mode().Perm())
 	}
 	if sourceAuth, err := os.ReadFile(filepath.Join(sourceHome, "auth.json")); err != nil || string(sourceAuth) != `{"access_token":"fixture"}` {
