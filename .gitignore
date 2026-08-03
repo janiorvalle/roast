@@ -1,0 +1,17 @@
+# Agent working files — planning notes, handoffs, session artifacts. Never public.
+llm-docs/
+handoffs/
+scratch/
+*.local.md
+
+# Environment and credentials
+.env
+.env.*
+
+# Build output
+/roast
+/roast.exe
+dist/
+
+# OS noise
+.DS_Store

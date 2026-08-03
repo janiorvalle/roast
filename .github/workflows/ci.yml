@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: filter
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          code=true
+          if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            # Keep both sides of a rename visible so a source-to-docs rename
+            # cannot skip the verification suite.
+            mapfile -t changed < <(git diff --no-renames --name-only "$BASE"...HEAD)
+            if [ "${#changed[@]}" -gt 0 ]; then
+              code=false
+              for file in "${changed[@]}"; do
+                case "$file" in
+                  *.md) ;;
+                  *) code=true; break ;;
+                esac
+              done
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: needs.changes.outputs.code == 'true'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        if: needs.changes.outputs.code == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build -buildvcs=false ./...
+        if: needs.changes.outputs.code == 'true'
+      - run: go vet ./...
+        if: needs.changes.outputs.code == 'true'
+      - run: go test ./...
+        if: needs.changes.outputs.code == 'true'
+
+  platform:
+    name: Go (${{ matrix.os }})
+    needs: changes
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: needs.changes.outputs.code == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        if: needs.changes.outputs.code == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build -buildvcs=false ./...
+        if: needs.changes.outputs.code == 'true'
+      - run: go vet ./...
+        if: needs.changes.outputs.code == 'true'
+      - run: go test ./...
+        if: needs.changes.outputs.code == 'true'
+
+  install-smoke:
+    name: Installer smoke
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: needs.changes.outputs.code == 'true'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        if: needs.changes.outputs.code == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make install-smoke
+        if: needs.changes.outputs.code == 'true'
+
+  workflow-lint:
+    name: Workflow lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write # Required for Reviewdog to publish the PR check.
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: reviewdog/action-actionlint@6fb7acc99f4a1008869fa8a0f09cfca740837d9d # v1.72.0
+        with:
+          fail_level: error
+          reporter: github-pr-check
+      - uses: zizmorcore/zizmor-action@6599ee8b7a49aef6a770f63d261d214911a7ce02 # v0.6.0
+        with:
+          persona: pedantic
+          min-severity: low
+          advanced-security: false
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read # Required to scan pull request metadata and refs.
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
