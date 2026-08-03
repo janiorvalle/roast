@@ -4,8 +4,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -24,32 +26,62 @@ type scriptedRunner struct {
 	err     error
 	delay   time.Duration
 
-	programs []string
-	dirs     []string
-	args     [][]string
-	inputs   []string
+	programs      []string
+	dirs          []string
+	args          [][]string
+	inputs        []string
+	environments  []map[string]string
+	sessionAction func()
 }
 
 func (command *scriptedRunner) Run(ctx context.Context, dir, program string, args ...string) (runner.Result, error) {
-	command.record(dir, program, "", args)
+	command.record(dir, program, "", nil, args)
 	return command.next(ctx)
 }
 
 func (command *scriptedRunner) RunWithInput(ctx context.Context, dir, program, input string, args ...string) (runner.Result, error) {
-	command.record(dir, program, input, args)
+	command.record(dir, program, input, nil, args)
 	return command.next(ctx)
 }
 
 func (command *scriptedRunner) RunWithInputStream(ctx context.Context, dir string, input []byte, _ io.Writer, program string, args ...string) (runner.Result, error) {
-	command.record(dir, program, string(input), args)
+	command.record(dir, program, string(input), nil, args)
 	return command.next(ctx)
 }
 
-func (command *scriptedRunner) record(dir, program, input string, args []string) {
+func (command *scriptedRunner) RunWithEnvironment(ctx context.Context, dir, program string, environment map[string]string, args ...string) (runner.Result, error) {
+	command.record(dir, program, "", environment, args)
+	return command.next(ctx)
+}
+
+func (command *scriptedRunner) RunWithInputAndEnvironment(ctx context.Context, dir, program, input string, environment map[string]string, args ...string) (runner.Result, error) {
+	command.record(dir, program, input, environment, args)
+	return command.next(ctx)
+}
+
+func (command *scriptedRunner) RunWithInputAndEnvironmentUntil(ctx context.Context, dir, program, input string, environment map[string]string, stop func([]byte) bool, args ...string) (runner.Result, error) {
+	command.record(dir, program, input, environment, args)
+	if command.sessionAction != nil {
+		command.sessionAction()
+	}
+	result, err := command.next(ctx)
+	if err != nil {
+		return result, err
+	}
+	for _, line := range bytes.Split(result.Stdout, []byte("\n")) {
+		if len(line) > 0 && stop(line) {
+			break
+		}
+	}
+	return result, nil
+}
+
+func (command *scriptedRunner) record(dir, program, input string, environment map[string]string, args []string) {
 	command.dirs = append(command.dirs, dir)
 	command.programs = append(command.programs, program)
 	command.args = append(command.args, append([]string(nil), args...))
 	command.inputs = append(command.inputs, input)
+	command.environments = append(command.environments, cloneEnvironment(environment))
 }
 
 func (command *scriptedRunner) next(ctx context.Context) (runner.Result, error) {
@@ -98,6 +130,20 @@ func (command *runnerOnly) RunWithInputStream(_ context.Context, _ string, _ []b
 	return command.result, nil
 }
 
+func (command *runnerOnly) RunWithEnvironment(ctx context.Context, _ string, program string, _ map[string]string, args ...string) (runner.Result, error) {
+	return command.Run(ctx, "", program, args...)
+}
+
+func (command *runnerOnly) RunWithInputAndEnvironment(_ context.Context, _ string, _ string, input string, _ map[string]string, args ...string) (runner.Result, error) {
+	command.args = append([]string(nil), args...)
+	if len(command.args) > 0 && command.args[len(command.args)-1] == "-" {
+		command.args[len(command.args)-1] = input
+	} else {
+		command.args = append(command.args, input)
+	}
+	return command.result, nil
+}
+
 func TestCodexArgumentsUseNativeIsolationFlags(t *testing.T) {
 	snapshotDir := t.TempDir()
 	selected := NewCodex(Options{Binary: "codex-test", Model: "model-test", Thinking: "high"})
@@ -134,6 +180,168 @@ func TestCodexArgumentsUseNativeIsolationFlags(t *testing.T) {
 	}
 }
 
+func TestStageCodexHomeCopiesOnlyAuthentication(t *testing.T) {
+	sourceHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sourceHome, "auth.json"), []byte(`{"access_token":"fixture"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceHome, "AGENTS.md"), []byte("operator instructions\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(codexHomeVariable, sourceHome)
+
+	stage, err := stageCodexHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagedHome := stage.environment[codexHomeVariable]
+	if stagedHome == "" || stagedHome == sourceHome {
+		t.Fatalf("staged environment = %#v, want a separate CODEX_HOME", stage.environment)
+	}
+	entries, err := os.ReadDir(stagedHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "auth.json" {
+		t.Fatalf("staged CODEX_HOME entries = %#v, want only auth.json", entries)
+	}
+	auth, err := os.ReadFile(filepath.Join(stagedHome, "auth.json"))
+	if err != nil || string(auth) != `{"access_token":"fixture"}` {
+		t.Fatalf("staged auth = %q, err = %v", auth, err)
+	}
+	info, err := os.Stat(filepath.Join(stagedHome, "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("staged auth permissions = %o, want 600", info.Mode().Perm())
+	}
+	if sourceAuth, err := os.ReadFile(filepath.Join(sourceHome, "auth.json")); err != nil || string(sourceAuth) != `{"access_token":"fixture"}` {
+		t.Fatalf("source auth after staging = %q, err = %v", sourceAuth, err)
+	}
+	stage.cleanup()
+	if _, err := os.Stat(stagedHome); !os.IsNotExist(err) {
+		t.Fatalf("staged CODEX_HOME still exists after cleanup: %v", err)
+	}
+}
+
+func TestStageCodexHomeSupportsSymlinkedAuthentication(t *testing.T) {
+	sourceHome := t.TempDir()
+	realAuth := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(realAuth, []byte(`{"access_token":"fixture"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realAuth, filepath.Join(sourceHome, "auth.json")); err != nil {
+		t.Skipf("symlink creation is unavailable: %v", err)
+	}
+	t.Setenv(codexHomeVariable, sourceHome)
+	stage, err := stageCodexHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stage.cleanup()
+	if auth, err := os.ReadFile(filepath.Join(stage.environment[codexHomeVariable], "auth.json")); err != nil || string(auth) != `{"access_token":"fixture"}` {
+		t.Fatalf("staged symlink auth = %q, err = %v", auth, err)
+	}
+	info, err := os.Lstat(filepath.Join(sourceHome, "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("Codex auth symlink was changed")
+	}
+}
+
+func TestCodexAuthForIsolatedHomeRemovesRefreshToken(t *testing.T) {
+	source := []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"access","refresh_token":"refresh","account_id":"account"}}`)
+	isolated, err := codexAuthForIsolatedHome(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Tokens map[string]string `json:"tokens"`
+	}
+	if err := json.Unmarshal(isolated, &document); err != nil {
+		t.Fatal(err)
+	}
+	if document.Tokens["access_token"] != "access" || document.Tokens["account_id"] != "account" || document.Tokens["refresh_token"] != "" {
+		t.Fatalf("isolated auth tokens = %#v, want access/account preserved and refresh empty", document.Tokens)
+	}
+	if string(source) == string(isolated) {
+		t.Fatal("isolated auth unexpectedly retained the source refresh token")
+	}
+}
+
+func TestStageCodexHomeRefreshesExpiringAuthWithNativeCodex(t *testing.T) {
+	sourceHome := t.TempDir()
+	t.Setenv("CODEX_ACCESS_TOKEN", "")
+	t.Setenv("CODEX_API_KEY", "")
+	expiringToken := codexTestJWT(time.Now().Add(time.Minute))
+	refreshedToken := codexTestJWT(time.Now().Add(time.Hour))
+	expiringAuth := []byte(fmt.Sprintf(`{"tokens":{"access_token":%q,"refresh_token":"fixture-refresh"}}`, expiringToken))
+	refreshedAuth := []byte(fmt.Sprintf(`{"tokens":{"access_token":%q,"refresh_token":"new-refresh"}}`, refreshedToken))
+	if err := os.WriteFile(filepath.Join(sourceHome, "auth.json"), expiringAuth, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(codexHomeVariable, sourceHome)
+	commands := &scriptedRunner{
+		sessionAction: func() {
+			if err := os.WriteFile(filepath.Join(sourceHome, "auth.json"), refreshedAuth, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		results: []runner.Result{{Stdout: []byte(`{"id":2,"result":{"account":{"type":"chatgpt"}}}`)}},
+	}
+
+	stage, err := stageCodexHomeForReview(context.Background(), Options{Command: commands, Binary: "codex-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stage.cleanup()
+	if len(commands.args) != 1 || len(commands.args[0]) < 2 || commands.args[0][0] != "app-server" || commands.args[0][1] != "--listen" {
+		t.Fatalf("native refresh args = %v", commands.args)
+	}
+	if commands.environments[0][codexHomeVariable] != sourceHome {
+		t.Fatalf("native refresh environment = %#v, want source CODEX_HOME", commands.environments[0])
+	}
+	stagedAuth, err := os.ReadFile(filepath.Join(stage.home, "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Tokens map[string]string `json:"tokens"`
+	}
+	if err := json.Unmarshal(stagedAuth, &document); err != nil {
+		t.Fatal(err)
+	}
+	if document.Tokens["access_token"] != refreshedToken || document.Tokens["refresh_token"] != "" {
+		t.Fatalf("staged refreshed auth = %#v, want refreshed access token and empty refresh token", document.Tokens)
+	}
+}
+
+func TestStageCodexHomeUsesEnvironmentAuthWithoutReadingAuthFile(t *testing.T) {
+	sourceHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sourceHome, "auth.json"), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(codexHomeVariable, sourceHome)
+	t.Setenv("CODEX_ACCESS_TOKEN", "at-fixture")
+	t.Setenv("CODEX_API_KEY", "")
+
+	stage, err := stageCodexHomeForReview(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stage.cleanup()
+	entries, err := os.ReadDir(stage.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("environment-auth staged home entries = %#v, want empty", entries)
+	}
+}
+
 func TestCodexSchemaAddsStrictSuggestionRequirement(t *testing.T) {
 	schema, err := codexSchema()
 	if err != nil {
@@ -159,6 +367,7 @@ func TestCodexSchemaAddsStrictSuggestionRequirement(t *testing.T) {
 
 func TestCodexReviewRunsInSnapshotWithPromptOnStdin(t *testing.T) {
 	snapshotDir := t.TempDir()
+	sourceHome := testCodexHome(t)
 	commands := &scriptedRunner{results: []runner.Result{
 		{ExitCode: 1, Stderr: []byte("Failed to read output schema file")},
 		{ExitCode: 1, Stderr: []byte("Failed to read output schema file")},
@@ -174,10 +383,20 @@ func TestCodexReviewRunsInSnapshotWithPromptOnStdin(t *testing.T) {
 	if string(response) == "" || len(commands.programs) != 4 || commands.programs[3] != "codex-test" || commands.dirs[3] != snapshotDir || commands.inputs[3] != "review this" {
 		t.Fatalf("Codex invocation = programs %q dirs %q inputs %q response %q", commands.programs, commands.dirs, commands.inputs, response)
 	}
+	if len(commands.environments) != 4 {
+		t.Fatalf("Codex environments = %d, want one isolated environment per invocation", len(commands.environments))
+	}
+	for index, environment := range commands.environments {
+		stagedHome := environment[codexHomeVariable]
+		if stagedHome == "" || stagedHome == sourceHome {
+			t.Fatalf("Codex environment %d = %#v, want a private CODEX_HOME", index, environment)
+		}
+	}
 }
 
 func TestCodexReviewRejectsUnsupportedFeatureOverride(t *testing.T) {
 	snapshotDir := t.TempDir()
+	testCodexHome(t)
 	commands := &scriptedRunner{results: []runner.Result{
 		{ExitCode: 1, Stderr: []byte("unknown field features.multi_agent")},
 	}}
@@ -188,6 +407,7 @@ func TestCodexReviewRejectsUnsupportedFeatureOverride(t *testing.T) {
 }
 
 func TestCodexReviewAcceptsLegacyAgentConfig(t *testing.T) {
+	testCodexHome(t)
 	commands := &scriptedRunner{results: []runner.Result{
 		{ExitCode: 1, Stderr: []byte("Failed to read output schema file")},
 		{ExitCode: 1, Stderr: []byte("Failed to read output schema file")},
@@ -240,6 +460,22 @@ func TestClaudeArgumentsUseNativeReadPermissions(t *testing.T) {
 			if strings.Contains(lower, forbidden) {
 				t.Fatalf("Claude argument %q retained removed isolation machinery", argument)
 			}
+		}
+	}
+}
+
+func TestClaudeArgumentsDisableUserInstructions(t *testing.T) {
+	arguments := NewClaude(Options{Binary: "claude-test"}).arguments(t.TempDir())
+	if !hasArgument(arguments, "--safe-mode") {
+		t.Fatalf("Claude arguments missing native CLAUDE.md isolation: %v", arguments)
+	}
+	settingSources := argumentIndex(arguments, "--setting-sources")
+	if settingSources < 0 || settingSources+1 >= len(arguments) || arguments[settingSources+1] != "" {
+		t.Fatalf("Claude arguments load user setting sources: %v", arguments)
+	}
+	for _, argument := range []string{"--system-prompt", "--append-system-prompt", "--settings"} {
+		if hasArgument(arguments, argument) {
+			t.Fatalf("Claude arguments explicitly load custom instructions with %q: %v", argument, arguments)
 		}
 	}
 }
@@ -367,6 +603,7 @@ func TestEngineEmitsHeartbeatDuringLongCall(t *testing.T) {
 
 func TestEngineUnavailableDoesNotSwitchEngines(t *testing.T) {
 	commands := &scriptedRunner{err: errors.New("executable file not found")}
+	testCodexHome(t)
 	selected := NewCodex(Options{Command: commands, Binary: "codex-test"})
 
 	_, err := selected.Review(context.Background(), Request{Prompt: "review", SnapshotDir: t.TempDir()})
@@ -428,6 +665,7 @@ func TestEngineDefaults(t *testing.T) {
 }
 
 func TestRunnerOnlyFallbackUsesPositionalPrompt(t *testing.T) {
+	testCodexHome(t)
 	commands := &runnerOnly{
 		probeResult:       runner.Result{ExitCode: 1, Stderr: []byte("Failed to read output schema file")},
 		legacyProbeResult: runner.Result{ExitCode: 1, Stderr: []byte("invalid type: boolean `false`, expected struct AgentRoleToml in `agents`")},
@@ -473,6 +711,34 @@ func argumentIndex(arguments []string, expected string) int {
 	return -1
 }
 
+func testCodexHome(t *testing.T) string {
+	t.Helper()
+	t.Setenv("CODEX_ACCESS_TOKEN", "")
+	t.Setenv("CODEX_API_KEY", "")
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte(`{"test":"auth"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(codexHomeVariable, home)
+	return home
+}
+
+func codexTestJWT(expiresAt time.Time) string {
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, expiresAt.Unix())))
+	return "header." + payload + ".signature"
+}
+
+func cloneEnvironment(environment map[string]string) map[string]string {
+	if environment == nil {
+		return nil
+	}
+	clone := make(map[string]string, len(environment))
+	for name, value := range environment {
+		clone[name] = value
+	}
+	return clone
+}
+
 func tarSnapshot(t *testing.T, files map[string]string) []byte {
 	t.Helper()
 	var archive bytes.Buffer
@@ -493,3 +759,4 @@ func tarSnapshot(t *testing.T, files map[string]string) []byte {
 
 var _ runner.Runner = (*scriptedRunner)(nil)
 var _ runner.InputRunner = (*scriptedRunner)(nil)
+var _ runner.InputEnvironmentSessionRunner = (*scriptedRunner)(nil)

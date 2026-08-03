@@ -309,7 +309,7 @@ func writeHeartbeat(writer io.Writer, format string, values ...any) {
 	_, _ = fmt.Fprintf(writer, format, values...)
 }
 
-func runCommandWithHeartbeat(ctx context.Context, options Options, label, prompt, dir, program string, args ...string) (runner.Result, error) {
+func runCommandWithHeartbeat(ctx context.Context, options Options, label, prompt, dir, program string, environment map[string]string, args ...string) (runner.Result, error) {
 	stop := make(chan struct{})
 	heartbeatDone := make(chan struct{})
 	started := time.Now()
@@ -331,6 +331,14 @@ func runCommandWithHeartbeat(ctx context.Context, options Options, label, prompt
 		<-heartbeatDone
 	}()
 
+	if len(environment) > 0 {
+		inputEnvironmentRunner, ok := options.Command.(runner.InputEnvironmentRunner)
+		if !ok {
+			return runner.Result{}, environmentIsolationError(label)
+		}
+		return inputEnvironmentRunner.RunWithInputAndEnvironment(ctx, dir, program, prompt, environment, args...)
+	}
+
 	if inputRunner, ok := options.Command.(runner.InputRunner); ok {
 		return inputRunner.RunWithInput(ctx, dir, program, prompt, args...)
 	}
@@ -344,6 +352,21 @@ func runCommandWithHeartbeat(ctx context.Context, options Options, label, prompt
 		fallbackArgs = append(fallbackArgs, prompt)
 	}
 	return options.Command.Run(ctx, dir, program, fallbackArgs...)
+}
+
+func runCommandWithEnvironment(ctx context.Context, command runner.Runner, label, dir, program string, environment map[string]string, args ...string) (runner.Result, error) {
+	if len(environment) == 0 {
+		return command.Run(ctx, dir, program, args...)
+	}
+	environmentRunner, ok := command.(runner.EnvironmentRunner)
+	if !ok {
+		return runner.Result{}, environmentIsolationError(label)
+	}
+	return environmentRunner.RunWithEnvironment(ctx, dir, program, environment, args...)
+}
+
+func environmentIsolationError(label string) error {
+	return fmt.Errorf("[ROAST-ENGINE-ISOLATION] %s review requires a per-process environment override, but the configured command runner cannot apply one; use runner.ExecRunner or implement runner.EnvironmentRunner and runner.InputEnvironmentRunner; no reviewer was started", label)
 }
 
 func commandError(ctx context.Context, label, binary string, result runner.Result, err error) error {
