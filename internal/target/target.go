@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -290,6 +291,9 @@ func resolvePullRequest(ctx context.Context, repoDir, number string, commands ru
 	args = append(args, "--json", "number,title,baseRefName,headRefName,baseRefOid,headRefOid,url")
 	result, err := commands.Run(ctx, repoDir, "gh", args...)
 	if err != nil {
+		if !required && errors.Is(err, exec.ErrNotFound) {
+			return Target{}, errNoCurrentPullRequest
+		}
 		if required {
 			return Target{}, fmt.Errorf("[ROAST-TARGET-GH] cannot run GitHub CLI: %w; install gh and run `gh auth login`, or use --base <ref> instead", err)
 		}

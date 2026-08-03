@@ -169,6 +169,30 @@ func TestResolveAutoSurfacesPullRequestLookupFailure(t *testing.T) {
 	}
 }
 
+func TestResolveAutoFallsThroughWhenGitHubCLIIsMissing(t *testing.T) {
+	repo := t.TempDir()
+	baseSHA := strings.Repeat("a", 40)
+	headSHA := strings.Repeat("b", 40)
+	ghCommand := "gh pr view --json number,title,baseRefName,headRefName,baseRefOid,headRefOid,url"
+	commands := fakeRunner{
+		responses: map[string]runner.Result{
+			"git rev-parse --show-toplevel":                                        {Stdout: []byte(repo + "\n")},
+			"git status --porcelain=v1 --untracked-files=all":                      {},
+			"git rev-parse --verify --quiet --end-of-options origin/main^{commit}": {Stdout: []byte(baseSHA + "\n")},
+			"git rev-parse --verify --quiet --end-of-options HEAD^{commit}":        {Stdout: []byte(headSHA + "\n")},
+		},
+		errors: map[string]error{ghCommand: exec.ErrNotFound},
+	}
+
+	got, err := Resolve(context.Background(), Options{RepoDir: repo, Runner: commands})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != KindBase || got.BaseRef != "origin/main" || got.BaseSHA != baseSHA || got.HeadSHA != headSHA {
+		t.Fatalf("target = %#v", got)
+	}
+}
+
 func TestIsNoCurrentPullRequestRecognizesGHDiagnosticVariants(t *testing.T) {
 	for _, message := range []string{
 		`no pull requests found for branch "feature"`,
@@ -186,10 +210,14 @@ func TestIsNoCurrentPullRequestRecognizesGHDiagnosticVariants(t *testing.T) {
 
 type fakeRunner struct {
 	responses map[string]runner.Result
+	errors    map[string]error
 }
 
 func (f fakeRunner) Run(_ context.Context, _ string, program string, args ...string) (runner.Result, error) {
 	key := strings.TrimSpace(program + " " + strings.Join(args, " "))
+	if err, ok := f.errors[key]; ok {
+		return runner.Result{}, err
+	}
 	result, ok := f.responses[key]
 	if !ok {
 		return runner.Result{ExitCode: 1, Stderr: []byte("unexpected command: " + key)}, nil
