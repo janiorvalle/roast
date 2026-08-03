@@ -1,10 +1,13 @@
 GORELEASER_VERSION ?= v2.11.2
 GORELEASER = go run github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION)
 
-.PHONY: build vet test release-check snapshot install-smoke verify install-hooks
+.PHONY: build format-check vet test release-check snapshot install-smoke verify install-hooks
 
 build:
 	go build ./...
+
+format-check:
+	test -z "$$(gofmt -l .)"
 
 vet:
 	go vet ./...
@@ -21,7 +24,7 @@ snapshot:
 install-smoke: snapshot
 	./scripts/install-smoke.sh
 
-verify: build vet test release-check install-smoke
+verify: format-check build vet test release-check install-smoke
 
 install-hooks:
 	@command -v gitleaks >/dev/null || { echo "gitleaks is required: https://github.com/gitleaks/gitleaks"; exit 1; }

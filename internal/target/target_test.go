@@ -134,12 +134,90 @@ func TestResolveAutoPrefersCurrentPullRequestBeforeOriginMain(t *testing.T) {
 	}
 }
 
+func TestResolveAutoFallsThroughForGenuineNoPullRequest(t *testing.T) {
+	repo := t.TempDir()
+	baseSHA := strings.Repeat("a", 40)
+	headSHA := strings.Repeat("b", 40)
+	commands := fakeRunner{responses: map[string]runner.Result{
+		"git rev-parse --show-toplevel":                                                    {Stdout: []byte(repo + "\n")},
+		"git status --porcelain=v1 --untracked-files=all":                                  {},
+		"gh pr view --json number,title,baseRefName,headRefName,baseRefOid,headRefOid,url": {ExitCode: 1, Stderr: []byte(`no pull requests found for branch "feature"`)},
+		"git rev-parse --verify --quiet --end-of-options origin/main^{commit}":             {Stdout: []byte(baseSHA + "\n")},
+		"git rev-parse --verify --quiet --end-of-options HEAD^{commit}":                    {Stdout: []byte(headSHA + "\n")},
+	}}
+
+	got, err := Resolve(context.Background(), Options{RepoDir: repo, Runner: commands})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != KindBase || got.BaseRef != "origin/main" || got.BaseSHA != baseSHA || got.HeadSHA != headSHA {
+		t.Fatalf("target = %#v", got)
+	}
+}
+
+func TestResolveAutoSurfacesPullRequestLookupFailure(t *testing.T) {
+	repo := t.TempDir()
+	commands := fakeRunner{responses: map[string]runner.Result{
+		"git rev-parse --show-toplevel":                                                    {Stdout: []byte(repo + "\n")},
+		"git status --porcelain=v1 --untracked-files=all":                                  {},
+		"gh pr view --json number,title,baseRefName,headRefName,baseRefOid,headRefOid,url": {ExitCode: 1, Stderr: []byte("network timeout")},
+	}}
+
+	_, err := Resolve(context.Background(), Options{RepoDir: repo, Runner: commands})
+	if err == nil || !strings.Contains(err.Error(), "ROAST-TARGET-GH") || !strings.Contains(err.Error(), "network timeout") {
+		t.Fatalf("error = %v, want the GitHub CLI failure", err)
+	}
+}
+
+func TestResolveAutoFallsThroughWhenGitHubCLIIsMissing(t *testing.T) {
+	repo := t.TempDir()
+	baseSHA := strings.Repeat("a", 40)
+	headSHA := strings.Repeat("b", 40)
+	ghCommand := "gh pr view --json number,title,baseRefName,headRefName,baseRefOid,headRefOid,url"
+	commands := fakeRunner{
+		responses: map[string]runner.Result{
+			"git rev-parse --show-toplevel":                                        {Stdout: []byte(repo + "\n")},
+			"git status --porcelain=v1 --untracked-files=all":                      {},
+			"git rev-parse --verify --quiet --end-of-options origin/main^{commit}": {Stdout: []byte(baseSHA + "\n")},
+			"git rev-parse --verify --quiet --end-of-options HEAD^{commit}":        {Stdout: []byte(headSHA + "\n")},
+		},
+		errors: map[string]error{ghCommand: exec.ErrNotFound},
+	}
+
+	got, err := Resolve(context.Background(), Options{RepoDir: repo, Runner: commands})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != KindBase || got.BaseRef != "origin/main" || got.BaseSHA != baseSHA || got.HeadSHA != headSHA {
+		t.Fatalf("target = %#v", got)
+	}
+}
+
+func TestIsNoCurrentPullRequestRecognizesGHDiagnosticVariants(t *testing.T) {
+	for _, message := range []string{
+		`no pull requests found for branch "feature"`,
+		`no open pull requests found for branch "feature"`,
+		"could not determine current branch: failed to run git: not on any branch",
+	} {
+		if !isNoCurrentPullRequest(runner.Result{Stderr: []byte(message)}) {
+			t.Errorf("diagnostic %q was not recognized as no current pull request", message)
+		}
+	}
+	if isNoCurrentPullRequest(runner.Result{Stderr: []byte("no git remotes found")}) {
+		t.Error("operational GitHub CLI failure was treated as no current pull request")
+	}
+}
+
 type fakeRunner struct {
 	responses map[string]runner.Result
+	errors    map[string]error
 }
 
 func (f fakeRunner) Run(_ context.Context, _ string, program string, args ...string) (runner.Result, error) {
 	key := strings.TrimSpace(program + " " + strings.Join(args, " "))
+	if err, ok := f.errors[key]; ok {
+		return runner.Result{}, err
+	}
 	result, ok := f.responses[key]
 	if !ok {
 		return runner.Result{ExitCode: 1, Stderr: []byte("unexpected command: " + key)}, nil
