@@ -116,6 +116,52 @@ func TestRunStopsWhenSensitiveChangesAreExcluded(t *testing.T) {
 	}
 }
 
+func TestRunSkipsInvalidUTF8ContextDocumentAndContinues(t *testing.T) {
+	repo := initMainRepository(t)
+	writeMainChange(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("valid context\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runMainGit(t, repo, "add", "README.md")
+	runMainGit(t, repo, "commit", "-m", "context document")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte{'#', ' ', 'R', 0xe9, 's', 'u', 'm', 0xe9, '\n'}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	responsePath := cleanResponseFixture(t, repo)
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
+	}
+	for _, expected := range []string{"ROAST-PROMPT-CONTEXT", `"README.md": not valid UTF-8`, "well done - send it."} {
+		if !strings.Contains(stderr.String(), expected) {
+			t.Fatalf("stderr = %q, missing %q", stderr.String(), expected)
+		}
+	}
+	if strings.Contains(stderr.String(), "ROAST-ENGINE-FAILED") {
+		t.Fatalf("engine failed after invalid context exclusion: %s", stderr.String())
+	}
+}
+
+func TestRunSanitizesInvalidUTF8DiffAndReportsAffectedFile(t *testing.T) {
+	repo := initMainRepository(t)
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte{'c', 'h', 'a', 'n', 'g', 'e', 'd', ' ', 0xe9, '\n'}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	responsePath := cleanResponseFixture(t, repo)
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
+	}
+	for _, expected := range []string{"ROAST-PROMPT-DIFF", `"base.txt"`, "U+FFFD", "well done - send it."} {
+		if !strings.Contains(stderr.String(), expected) {
+			t.Fatalf("stderr = %q, missing %q", stderr.String(), expected)
+		}
+	}
+	if strings.Contains(stderr.String(), "ROAST-ENGINE-FAILED") {
+		t.Fatalf("engine failed after invalid diff sanitization: %s", stderr.String())
+	}
+}
+
 func TestRunShortCircuitsEmptyDiffBeforeSecretScanAndEngine(t *testing.T) {
 	repo := initMainRepository(t)
 	var stdout, stderr bytes.Buffer
