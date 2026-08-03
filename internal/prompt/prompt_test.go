@@ -76,6 +76,23 @@ func TestContextDocumentsSelectsNamedAndGlobFiles(t *testing.T) {
 	}
 }
 
+func TestContextDocumentsExcludesInvalidUTF8Documents(t *testing.T) {
+	invalid := string([]byte{'#', ' ', 'R', 0xe9, 's', 'u', 'm', 0xe9, '\n'})
+	selection, err := ContextDocuments(makeSnapshot(t, map[string]string{"README.md": invalid}), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selection.Documents) != 0 {
+		t.Fatalf("documents = %#v, want no invalid documents", selection.Documents)
+	}
+	if len(selection.ExcludedDocuments) != 1 || selection.ExcludedDocuments[0].Path != "README.md" || selection.ExcludedDocuments[0].Reason != "not valid UTF-8" {
+		t.Fatalf("exclusions = %#v", selection.ExcludedDocuments)
+	}
+	if notice := selection.ExclusionNotice(); !strings.Contains(notice, `"README.md": not valid UTF-8`) {
+		t.Fatalf("notice = %q", notice)
+	}
+}
+
 func TestContextDocumentsCapsAndReportsExclusions(t *testing.T) {
 	tooLarge := "too large\n" + strings.Repeat("x", maxContextDocumentBytes)
 	selection, err := ContextDocuments(makeSnapshot(t, map[string]string{

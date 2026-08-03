@@ -8,8 +8,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/janiorvalle/roast/internal/runner"
 	"github.com/janiorvalle/roast/internal/secrets"
@@ -65,6 +67,95 @@ func Build(ctx context.Context, reviewTarget target.Target, commands runner.Runn
 		return Bundle{}, err
 	}
 	return Bundle{Target: reviewTarget, Diff: diff, SecretScanDiff: secretScanDiff, SecretScanSnapshot: secretScanSnapshot, ExcludedSensitivePaths: excludedSensitivePaths, Snapshot: snapshot}, nil
+}
+
+// SanitizeDiffForPrompt replaces invalid UTF-8 sequences in review diff text
+// with U+FFFD. The raw diff remains in Bundle.Diff for bundle fingerprints and
+// local secret scanning; this function only prepares the prompt copy.
+func SanitizeDiffForPrompt(diff []byte) (string, []string) {
+	if utf8.Valid(diff) {
+		return string(diff), nil
+	}
+
+	lines := bytes.SplitAfter(diff, []byte("\n"))
+	var sanitized bytes.Buffer
+	invalidPaths := make(map[string]struct{})
+	currentPaths := []string(nil)
+	inFileHeader := false
+	for _, line := range lines {
+		lineText := trimDiffPromptLine(line)
+		if bytes.HasPrefix(line, []byte("diff --git ")) {
+			currentPaths, _ = bundleDiffHeaderPaths(strings.TrimPrefix(lineText, "diff --git "))
+			inFileHeader = true
+		} else if inFileHeader {
+			switch {
+			case strings.HasPrefix(lineText, "@@ "), strings.HasPrefix(lineText, "GIT binary patch"):
+				inFileHeader = false
+			default:
+				currentPaths = appendDiffPromptPath(currentPaths, lineText)
+			}
+		}
+
+		if !utf8.Valid(line) {
+			for _, path := range currentPaths {
+				invalidPaths[strings.ToValidUTF8(path, "\uFFFD")] = struct{}{}
+			}
+			if len(currentPaths) == 0 {
+				invalidPaths["diff metadata"] = struct{}{}
+			}
+			_, _ = sanitized.Write(bytes.ToValidUTF8(line, []byte("\uFFFD")))
+			continue
+		}
+		_, _ = sanitized.Write(line)
+	}
+
+	paths := make([]string, 0, len(invalidPaths))
+	for path := range invalidPaths {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return sanitized.String(), paths
+}
+
+func trimDiffPromptLine(line []byte) string {
+	return strings.TrimSuffix(strings.TrimSuffix(string(line), "\n"), "\r")
+}
+
+func appendDiffPromptPath(paths []string, line string) []string {
+	var candidates []string
+	for _, header := range []struct {
+		marker string
+		prefix string
+	}{
+		{marker: "--- ", prefix: "a/"},
+		{marker: "+++ ", prefix: "b/"},
+	} {
+		if strings.HasPrefix(line, header.marker) {
+			if path, ok := bundleDiffPath(strings.TrimPrefix(line, header.marker), header.prefix); ok {
+				candidates = append(candidates, path)
+			}
+		}
+	}
+	for _, marker := range []string{"rename from ", "rename to ", "copy from ", "copy to "} {
+		if strings.HasPrefix(line, marker) {
+			if path, ok := bundleExtendedDiffPath(strings.TrimPrefix(line, marker)); ok {
+				candidates = append(candidates, path)
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		alreadyListed := false
+		for _, listed := range paths {
+			if listed == candidate {
+				alreadyListed = true
+				break
+			}
+		}
+		if !alreadyListed {
+			paths = append(paths, candidate)
+		}
+	}
+	return paths
 }
 
 func ensureMergeBase(ctx context.Context, reviewTarget target.Target, commands runner.Runner) error {

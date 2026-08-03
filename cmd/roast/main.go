@@ -232,6 +232,14 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 	if notice := contextSelection.ExclusionNotice(); notice != "" {
 		fmt.Fprintf(stderr, "roast: %s\n", notice)
 	}
+	promptDiff, invalidDiffPaths := bundle.SanitizeDiffForPrompt(reviewBundle.Diff)
+	if len(invalidDiffPaths) > 0 {
+		displayedPaths := make([]string, 0, len(invalidDiffPaths))
+		for _, path := range invalidDiffPaths {
+			displayedPaths = append(displayedPaths, strconv.Quote(displayProvenanceValue(path)))
+		}
+		fmt.Fprintf(stderr, "roast: [ROAST-PROMPT-DIFF] replaced invalid UTF-8 sequences in %s with U+FFFD in the review prompt; the raw diff remains available to local secret scanning\n", strings.Join(displayedPaths, ", "))
+	}
 	snapshotFiles, err := verdict.SnapshotFiles(reviewBundle.Snapshot)
 	if err != nil {
 		fmt.Fprintf(stderr, "roast: %v\n", err)
@@ -266,7 +274,7 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 		Target:             reviewTarget.Range,
 		Branch:             branch,
 		ExtraPrompt:        *extraPrompt,
-		Diff:               string(reviewBundle.Diff),
+		Diff:               promptDiff,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "roast: %v\n", err)

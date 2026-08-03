@@ -8,6 +8,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -33,7 +34,7 @@ const (
 )
 
 // ContextSelection contains the documents that fit in the review prompt and
-// the candidates deliberately left out by the size limits.
+// the candidates deliberately left out by the selection policy.
 type ContextSelection struct {
 	Documents         []Document
 	ExcludedDocuments []ContextDocumentExclusion
@@ -52,7 +53,7 @@ func (selection ContextSelection) ExclusionNotice() string {
 	}
 
 	var notice strings.Builder
-	fmt.Fprintf(&notice, "[ROAST-PROMPT-CONTEXT] excluded %d context document(s) from the review prompt (per-document limit %d bytes; total limit %d bytes):", len(selection.ExcludedDocuments), maxContextDocumentBytes, maxContextTotalBytes)
+	fmt.Fprintf(&notice, "[ROAST-PROMPT-CONTEXT] excluded %d context document(s) from the review prompt:", len(selection.ExcludedDocuments))
 	for _, exclusion := range selection.ExcludedDocuments {
 		fmt.Fprintf(&notice, "\n  %q: %s", exclusion.Path, exclusion.Reason)
 	}
@@ -208,10 +209,16 @@ func ContextDocuments(snapshot []byte, glob string) (ContextSelection, error) {
 			return ContextSelection{}, fmt.Errorf("[ROAST-PROMPT-SNAPSHOT] cannot read snapshot file %q: %w; rebuild the review bundle and retry", header.Name, err)
 		}
 		if isContextDocument(header.Name, glob) {
-			candidates = append(candidates, contextCandidate{
-				document: Document{Path: header.Name, Content: string(content)},
+			candidate := contextCandidate{
+				document: Document{Path: header.Name},
 				priority: contextDocumentPriority(header.Name, glob),
-			})
+			}
+			if !utf8.Valid(content) {
+				candidate.exclusionReason = "not valid UTF-8"
+			} else {
+				candidate.document.Content = string(content)
+			}
+			candidates = append(candidates, candidate)
 		}
 	}
 
@@ -228,6 +235,13 @@ func ContextDocuments(snapshot []byte, glob string) (ContextSelection, error) {
 	}
 	totalRenderedBytes := 0
 	for _, candidate := range candidates {
+		if candidate.exclusionReason != "" {
+			selection.ExcludedDocuments = append(selection.ExcludedDocuments, ContextDocumentExclusion{
+				Path:   candidate.document.Path,
+				Reason: candidate.exclusionReason,
+			})
+			continue
+		}
 		documentBytes := len(candidate.document.Content)
 		if documentBytes > maxContextDocumentBytes {
 			selection.ExcludedDocuments = append(selection.ExcludedDocuments, ContextDocumentExclusion{
@@ -254,8 +268,9 @@ func ContextDocuments(snapshot []byte, glob string) (ContextSelection, error) {
 }
 
 type contextCandidate struct {
-	document Document
-	priority int
+	document        Document
+	priority        int
+	exclusionReason string
 }
 
 func contextDocumentPriority(name, glob string) int {

@@ -10,10 +10,41 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/janiorvalle/roast/internal/runner"
 	"github.com/janiorvalle/roast/internal/target"
 )
+
+func TestSanitizeDiffForPromptReplacesInvalidUTF8AndNamesFiles(t *testing.T) {
+	diff := []byte("diff --git a/README.md b/README.md\nindex 1111111..2222222 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-")
+	diff = append(diff, []byte("+R")...)
+	diff = append(diff, 0xe9)
+	diff = append(diff, []byte("sum")...)
+	diff = append(diff, 0xe9, '\n')
+
+	sanitized, paths := SanitizeDiffForPrompt(diff)
+	if !utf8.ValidString(sanitized) {
+		t.Fatalf("sanitized diff is not valid UTF-8: %q", sanitized)
+	}
+	if !strings.Contains(sanitized, "R\uFFFDsum\uFFFD") {
+		t.Fatalf("sanitized diff = %q, want replacement characters", sanitized)
+	}
+	if len(paths) != 1 || paths[0] != "README.md" {
+		t.Fatalf("invalid UTF-8 paths = %#v, want README.md", paths)
+	}
+}
+
+func TestSanitizeDiffForPromptPreservesValidDiff(t *testing.T) {
+	diff := []byte("diff --git a/main.go b/main.go\n@@ -1 +1 @@\n-package main\n+package review\n")
+	got, paths := SanitizeDiffForPrompt(diff)
+	if got != string(diff) {
+		t.Fatalf("sanitized valid diff = %q, want original", got)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("invalid UTF-8 paths = %#v, want none", paths)
+	}
+}
 
 func TestBuildDirtyBundleIncludesUntrackedDiffButNotIgnoredSnapshotFiles(t *testing.T) {
 	repo := initBundleRepository(t)
