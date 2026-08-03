@@ -146,6 +146,9 @@ func writeGitBlobs(ctx context.Context, repoDir string, entries []treeEntry, arc
 	args := []string{"cat-file", "--batch"}
 	stream := newBatchArchiveWriter(archive, entries)
 	result, err := commands.RunWithInputStream(ctx, repoDir, input.Bytes(), stream, "git", args...)
+	if stream.firstErr != nil {
+		return stream.firstErr
+	}
 	if err != nil {
 		return fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] cannot run git cat-file --batch: %w; retry the snapshot", err)
 	}
@@ -164,6 +167,7 @@ type batchArchiveWriter struct {
 	header             []byte
 	remaining          int64
 	expectingSeparator bool
+	firstErr           error
 }
 
 func newBatchArchiveWriter(archive *tar.Writer, entries []treeEntry) *batchArchiveWriter {
@@ -174,11 +178,11 @@ func (writer *batchArchiveWriter) Write(data []byte) (int, error) {
 	consumed := 0
 	for len(data) > 0 {
 		if writer.index >= len(writer.entries) {
-			return consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] response has trailing bytes after the last tracked file; retry the snapshot")
+			return writer.fail(consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] response has trailing bytes after the last tracked file; retry the snapshot"))
 		}
 		if writer.expectingSeparator {
 			if data[0] != '\n' {
-				return consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] missing record separator after %q; retry the snapshot", writer.entries[writer.index].Name)
+				return writer.fail(consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] missing record separator after %q; retry the snapshot", writer.entries[writer.index].Name))
 			}
 			data = data[1:]
 			consumed++
@@ -196,10 +200,10 @@ func (writer *batchArchiveWriter) Write(data []byte) (int, error) {
 			if take > 0 {
 				written, err := writer.archive.Write(data[:int(take)])
 				if err != nil {
-					return consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] cannot write tracked file %q: %w", writer.entries[writer.index].Name, err)
+					return writer.fail(consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] cannot write tracked file %q: %w", writer.entries[writer.index].Name, err))
 				}
 				if written != int(take) {
-					return consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] short write for tracked file %q; retry the snapshot", writer.entries[writer.index].Name)
+					return writer.fail(consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] short write for tracked file %q; retry the snapshot", writer.entries[writer.index].Name))
 				}
 				data = data[int(take):]
 				consumed += int(take)
@@ -214,25 +218,25 @@ func (writer *batchArchiveWriter) Write(data []byte) (int, error) {
 		lineEnd := bytes.IndexByte(data, '\n')
 		if lineEnd < 0 {
 			if len(writer.header)+len(data) > maxGitBatchHeaderBytes {
-				return consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] response header is too long; retry the snapshot")
+				return writer.fail(consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] response header is too long; retry the snapshot"))
 			}
 			writer.header = append(writer.header, data...)
 			consumed += len(data)
 			return consumed, nil
 		}
 		if len(writer.header)+lineEnd > maxGitBatchHeaderBytes {
-			return consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] response header is too long; retry the snapshot")
+			return writer.fail(consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] response header is too long; retry the snapshot"))
 		}
 		writer.header = append(writer.header, data[:lineEnd]...)
 		data = data[lineEnd+1:]
 		consumed += lineEnd + 1
 		size, err := parseGitBatchHeader(writer.header, writer.entries[writer.index])
 		if err != nil {
-			return consumed, err
+			return writer.fail(consumed, err)
 		}
 		entry := writer.entries[writer.index]
 		if err := writeSnapshotHeader(writer.archive, entry.Name, entry.Mode, size); err != nil {
-			return consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] cannot start tracked file %q: %w", writer.entries[writer.index].Name, err)
+			return writer.fail(consumed, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT-BATCH] cannot start tracked file %q: %w", writer.entries[writer.index].Name, err))
 		}
 		writer.remaining = size
 		if writer.remaining == 0 {
@@ -240,6 +244,13 @@ func (writer *batchArchiveWriter) Write(data []byte) (int, error) {
 		}
 	}
 	return consumed, nil
+}
+
+func (writer *batchArchiveWriter) fail(consumed int, err error) (int, error) {
+	if writer.firstErr == nil {
+		writer.firstErr = err
+	}
+	return consumed, err
 }
 
 func (writer *batchArchiveWriter) finish() error {

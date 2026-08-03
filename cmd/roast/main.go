@@ -93,6 +93,9 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 	extraPrompt := flags.String("extra-prompt", "", "append extra review guidance to the prompt")
 	showVersion := flags.Bool("version", false, "print the version")
 	if err := flags.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
 		return 2
 	}
 	if *showVersion {

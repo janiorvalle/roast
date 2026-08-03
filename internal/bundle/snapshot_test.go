@@ -84,6 +84,24 @@ func TestBuildSnapshotUsesOneBatchBlobRead(t *testing.T) {
 	}
 }
 
+func TestWriteGitBlobsPreservesBatchParserErrorWhenGitExitsAfterBrokenPipe(t *testing.T) {
+	firstObject := strings.Repeat("a", 40)
+	missingObject := strings.Repeat("b", 40)
+	entries := []treeEntry{
+		{Mode: 0o100644, Type: "blob", Object: firstObject, Name: "first.txt"},
+		{Mode: 0o100644, Type: "blob", Object: missingObject, Name: "missing.txt"},
+	}
+	batchOutput := appendBatchRecord(nil, firstObject, "first\n")
+	batchOutput = append(batchOutput, missingObject+" missing\n"...)
+	commands := batchOutputRunner{output: batchOutput}
+	archive := tar.NewWriter(io.Discard)
+
+	err := writeGitBlobs(context.Background(), t.TempDir(), entries, archive, commands)
+	if err == nil || !strings.Contains(err.Error(), `object "`+missingObject+`" for tracked file "missing.txt" is missing`) {
+		t.Fatalf("error = %v, want the specific missing-object diagnostic", err)
+	}
+}
+
 func TestBuildSnapshotPreservesArchiveAttributeFilesAndBytes(t *testing.T) {
 	repo := initBundleRepository(t)
 	writeBundleFile(t, repo, ".gitattributes", "hidden.txt export-ignore\nsource.txt export-subst\n")
@@ -222,4 +240,17 @@ func appendBatchRecord(output []byte, object, content string) []byte {
 	output = append(output, fmt.Sprintf("%s blob %d\n", object, len(content))...)
 	output = append(output, content...)
 	return append(output, '\n')
+}
+
+type batchOutputRunner struct {
+	output []byte
+}
+
+func (batchOutputRunner) Run(context.Context, string, string, ...string) (runner.Result, error) {
+	return runner.Result{}, nil
+}
+
+func (r batchOutputRunner) RunWithInputStream(_ context.Context, _ string, _ []byte, stdout io.Writer, _ string, _ ...string) (runner.Result, error) {
+	_, _ = stdout.Write(r.output)
+	return runner.Result{ExitCode: -1, Stderr: []byte("broken pipe")}, nil
 }

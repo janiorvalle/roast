@@ -36,6 +36,16 @@ func TestRunVersion(t *testing.T) {
 	}
 }
 
+func TestRunHelpReturnsSuccess(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--help"}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Usage of roast:") {
+		t.Fatalf("stderr = %q, want usage output", stderr.String())
+	}
+}
+
 func TestRunInstallSkillUsesInstallerAndWritesTranscript(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	called := false

@@ -67,6 +67,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - run: test -z "$(gofmt -l .)"
+        if: needs.changes.outputs.code == 'true'
       - run: go build -buildvcs=false ./...
         if: needs.changes.outputs.code == 'true'
       - run: go vet ./...

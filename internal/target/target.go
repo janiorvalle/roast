@@ -3,6 +3,7 @@ package target
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -232,8 +233,12 @@ func resolveAuto(ctx context.Context, repoDir string, git runner.Runner) (Target
 		return resolveDirty(ctx, repoDir, git)
 	}
 
-	if pullRequest, prErr := resolvePullRequest(ctx, repoDir, "", git, false); prErr == nil {
+	pullRequest, prErr := resolvePullRequest(ctx, repoDir, "", git, false)
+	if prErr == nil {
 		return pullRequest, nil
+	}
+	if !errors.Is(prErr, errNoCurrentPullRequest) {
+		return Target{}, prErr
 	}
 
 	for _, candidate := range []string{"origin/main", "origin/master", "main", "master"} {
@@ -271,6 +276,8 @@ type pullRequestMetadata struct {
 	URL         string `json:"url"`
 }
 
+var errNoCurrentPullRequest = errors.New("no current pull request")
+
 func resolvePullRequest(ctx context.Context, repoDir, number string, commands runner.Runner, required bool) (Target, error) {
 	args := []string{"pr", "view"}
 	if number != "" {
@@ -286,13 +293,16 @@ func resolvePullRequest(ctx context.Context, repoDir, number string, commands ru
 		if required {
 			return Target{}, fmt.Errorf("[ROAST-TARGET-GH] cannot run GitHub CLI: %w; install gh and run `gh auth login`, or use --base <ref> instead", err)
 		}
-		return Target{}, err
+		return Target{}, fmt.Errorf("[ROAST-TARGET-GH] cannot run GitHub CLI: %w; install gh and run `gh auth login`, or use --base <ref> instead", err)
 	}
 	if result.ExitCode != 0 {
+		if !required && isNoCurrentPullRequest(result) {
+			return Target{}, errNoCurrentPullRequest
+		}
 		if required {
 			return Target{}, fmt.Errorf("[ROAST-TARGET-GH] GitHub CLI could not load %sPR metadata: %s; install gh and run `gh auth login`, or use --base <ref> instead", prNumberPrefix(number), runner.Failure("gh", args, result))
 		}
-		return Target{}, runner.Failure("gh", args, result)
+		return Target{}, fmt.Errorf("[ROAST-TARGET-GH] GitHub CLI could not load current PR metadata: %s; install gh and run `gh auth login`, or use --base <ref> instead", runner.Failure("gh", args, result))
 	}
 	var metadata pullRequestMetadata
 	if err := json.Unmarshal(result.Stdout, &metadata); err != nil {
@@ -324,6 +334,20 @@ func resolvePullRequest(ctx context.Context, repoDir, number string, commands ru
 		PRTitle:      metadata.Title,
 		ThreeDotDiff: true,
 	}, nil
+}
+
+func isNoCurrentPullRequest(result runner.Result) bool {
+	message := strings.ToLower(strings.TrimSpace(string(result.Stderr)))
+	for _, prefix := range []string{
+		"no pull requests found for branch",
+		"no open pull requests found for branch",
+		"could not determine current branch: failed to run git: not on any branch",
+	} {
+		if strings.HasPrefix(message, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func prNumberPrefix(number string) string {
