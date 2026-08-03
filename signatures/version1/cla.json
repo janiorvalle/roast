@@ -1,0 +1,28 @@
+{
+   "signedContributors": [
+      {
+         "name": "janiorvalle",
+         "id": 84532977,
+         "comment_id": 0,
+         "created_at": "2026-08-03T00:04:34Z",
+         "repoId": 1321001040,
+         "pullRequestNo": 0
+      },
+      {
+         "name": "dependabot[bot]",
+         "id": 49699333,
+         "comment_id": 0,
+         "created_at": "2026-08-03T00:04:34Z",
+         "repoId": 1321001040,
+         "pullRequestNo": 0
+      },
+      {
+         "name": "github-actions[bot]",
+         "id": 41898282,
+         "comment_id": 0,
+         "created_at": "2026-08-03T00:04:34Z",
+         "repoId": 1321001040,
+         "pullRequestNo": 0
+      }
+   ]
+}
