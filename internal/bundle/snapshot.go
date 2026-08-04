@@ -77,6 +77,20 @@ func filterSensitiveSnapshot(data []byte) ([]byte, error) {
 	}
 }
 
+func snapshotFileSizes(data []byte) map[string]int {
+	sizes := make(map[string]int)
+	reader := tar.NewReader(bytes.NewReader(data))
+	for {
+		header, err := reader.Next()
+		if err != nil {
+			return sizes
+		}
+		if header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeRegA {
+			sizes[header.Name] = int(header.Size)
+		}
+	}
+}
+
 func buildSnapshot(ctx context.Context, reviewTarget target.Target, commands runner.Runner, includeSensitive bool) ([]byte, error) {
 	if reviewTarget.RepoDir == "" {
 		return nil, fmt.Errorf("[ROAST-BUNDLE-SNAPSHOT] target has no repository directory; resolve a target before building a snapshot")

@@ -15,7 +15,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/janiorvalle/roast/internal/prompt"
 	"github.com/janiorvalle/roast/internal/runner"
 	"github.com/janiorvalle/roast/internal/verdict"
 )
@@ -563,6 +565,76 @@ func TestEngineRetriesInvalidJSONWithValidatorFeedback(t *testing.T) {
 	}
 	if !bytes.Contains(response, []byte("\"overall\": \"well_done\"")) {
 		t.Fatalf("response = %s", response)
+	}
+}
+
+func TestReviewWithRetryChecksProvenanceWithinPromptLimitBeforeEngineCall(t *testing.T) {
+	request := Request{
+		Prompt:            "base prompt",
+		Provenance:        verdict.Provenance{Target: "HEAD", Branch: "main", Tree: "tree", Engine: "engine", Context: "context"},
+		SnapshotDir:       t.TempDir(),
+		DiffContributions: []prompt.DiffContribution{{Path: "change.go", Bytes: 10}},
+	}
+	request.MaximumPromptBytes = len(PromptWithProvenance(request.Prompt, request.Provenance)) - 1
+	calls := 0
+	_, err := reviewWithRetry(context.Background(), request, "test", io.Discard, func(context.Context, string) ([]byte, error) {
+		calls++
+		return []byte(validVerdict), nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "ROAST-PROMPT-SIZE") || !strings.Contains(err.Error(), "no review engine was called") {
+		t.Fatalf("error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("engine calls = %d, want 0", calls)
+	}
+}
+
+func TestReviewWithRetryReservesSpaceForValidatorFeedback(t *testing.T) {
+	request := Request{
+		Prompt:             "base prompt",
+		SnapshotDir:        t.TempDir(),
+		MaximumPromptBytes: len("base prompt") + RetryPromptReserveBytes(),
+	}
+	calls := 0
+	response, err := reviewWithRetry(context.Background(), request, "test", io.Discard, func(_ context.Context, actualPrompt string) ([]byte, error) {
+		calls++
+		if len(actualPrompt) > request.MaximumPromptBytes {
+			t.Fatalf("engine prompt = %d bytes, limit = %d", len(actualPrompt), request.MaximumPromptBytes)
+		}
+		if calls == 1 {
+			return []byte("not json"), nil
+		}
+		return []byte(validVerdict), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || len(response) == 0 {
+		t.Fatalf("engine calls = %d, response = %q", calls, response)
+	}
+}
+
+func TestCodexRejectsOversizedPromptBeforeAdapterSetup(t *testing.T) {
+	commands := &scriptedRunner{}
+	selected := NewCodex(Options{Command: commands, Binary: "codex-test"})
+	_, err := selected.Review(context.Background(), Request{
+		Prompt:             "prompt",
+		Provenance:         verdict.Provenance{Target: "HEAD", Branch: "main", Tree: "tree", Engine: "engine", Context: "context"},
+		SnapshotDir:        t.TempDir(),
+		MaximumPromptBytes: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "ROAST-PROMPT-SIZE") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(commands.programs) != 0 {
+		t.Fatalf("adapter commands = %v, want none", commands.programs)
+	}
+}
+
+func TestBoundedValidatorFeedbackPreservesUTF8(t *testing.T) {
+	feedback := boundedValidatorFeedback(errors.New(strings.Repeat("é", maxValidatorFeedbackBytes)))
+	if len(feedback) > maxValidatorFeedbackBytes || !strings.HasSuffix(feedback, "...") || !utf8.ValidString(feedback) {
+		t.Fatalf("feedback bytes = %d, suffix = %q, valid UTF-8 = %t", len(feedback), feedback[len(feedback)-3:], utf8.ValidString(feedback))
 	}
 }
 

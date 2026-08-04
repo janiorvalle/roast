@@ -14,7 +14,9 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	reviewprompt "github.com/janiorvalle/roast/internal/prompt"
 	"github.com/janiorvalle/roast/internal/runner"
 	"github.com/janiorvalle/roast/internal/verdict"
 )
@@ -26,6 +28,8 @@ type Request struct {
 	AllowedFiles       map[string]struct{}
 	SnapshotLineCounts map[string]int
 	DiffLineRanges     map[string][]verdict.LineRange
+	MaximumPromptBytes int
+	DiffContributions  []reviewprompt.DiffContribution
 }
 
 type ReviewEngine interface {
@@ -176,14 +180,44 @@ type reviewCall func(context.Context, string) ([]byte, error)
 
 const retryPromptSuffix = "\n\nYour previous response was rejected by the verdict validator. Correct this validation error and return exactly one JSON object matching the requested schema. Do not include markdown fences or commentary.\nValidator error: "
 
+const maxValidatorFeedbackBytes = 2048
+
+func RetryPromptReserveBytes() int {
+	return len(retryPromptSuffix) + maxValidatorFeedbackBytes
+}
+
+func validatePromptBudget(request Request) error {
+	if request.MaximumPromptBytes <= 0 {
+		return nil
+	}
+	return reviewprompt.ValidateSize(promptWithProvenance(request), reviewprompt.SizeBudget{
+		MaximumBytes:  request.MaximumPromptBytes,
+		ReservedBytes: RetryPromptReserveBytes(),
+	}, request.DiffContributions)
+}
+
 func reviewWithRetry(ctx context.Context, request Request, label string, heartbeat io.Writer, call reviewCall) ([]byte, error) {
 	if err := validateRequest(request); err != nil {
+		return nil, err
+	}
+	if err := validatePromptBudget(request); err != nil {
 		return nil, err
 	}
 	prompt := promptWithProvenance(request)
 	basePrompt := prompt
 	var validationErr error
 	for attempt := 1; attempt <= 2; attempt++ {
+		if request.MaximumPromptBytes > 0 {
+			var sizeErr error
+			if attempt == 1 {
+				sizeErr = reviewprompt.ValidateSize(prompt, reviewprompt.SizeBudget{MaximumBytes: request.MaximumPromptBytes}, request.DiffContributions)
+			} else {
+				sizeErr = reviewprompt.ValidateRetrySize(prompt, reviewprompt.SizeBudget{MaximumBytes: request.MaximumPromptBytes}, request.DiffContributions)
+			}
+			if sizeErr != nil {
+				return nil, sizeErr
+			}
+		}
 		raw, err := call(ctx, prompt)
 		if err != nil {
 			return nil, err
@@ -195,10 +229,22 @@ func reviewWithRetry(ctx context.Context, request Request, label string, heartbe
 		validationErr = err
 		if attempt == 1 {
 			writeHeartbeat(heartbeat, "roast: [ROAST-ENGINE] %s returned invalid verdict JSON; retrying once: %s\n", label, err)
-			prompt = RetryPromptPrefix(basePrompt) + err.Error()
+			prompt = RetryPromptPrefix(basePrompt) + boundedValidatorFeedback(err)
 		}
 	}
 	return nil, fmt.Errorf("[ROAST-ENGINE-JSON] %s returned invalid verdict JSON after one retry: %w; return exactly one JSON object matching the verdict schema", label, validationErr)
+}
+
+func boundedValidatorFeedback(validationErr error) string {
+	feedback := strings.ToValidUTF8(validationErr.Error(), "\uFFFD")
+	if len(feedback) <= maxValidatorFeedbackBytes {
+		return feedback
+	}
+	end := maxValidatorFeedbackBytes - len("...")
+	for end > 0 && !utf8.ValidString(feedback[:end]) {
+		end--
+	}
+	return feedback[:end] + "..."
 }
 
 func PromptWithProvenance(prompt string, provenance verdict.Provenance) string {

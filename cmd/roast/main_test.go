@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/janiorvalle/roast/internal/bundle"
+	"github.com/janiorvalle/roast/internal/prompt"
 	"github.com/janiorvalle/roast/internal/runner"
 	"github.com/janiorvalle/roast/internal/target"
 	"github.com/janiorvalle/roast/internal/verdict"
@@ -159,6 +161,65 @@ func TestRunSanitizesInvalidUTF8DiffAndReportsAffectedFile(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "ROAST-ENGINE-FAILED") {
 		t.Fatalf("engine failed after invalid diff sanitization: %s", stderr.String())
+	}
+}
+
+func TestRunRejectsOversizedPromptBeforeFakeEngine(t *testing.T) {
+	repo := initMainRepository(t)
+	if err := os.WriteFile(filepath.Join(repo, "dominant.txt"), []byte(strings.Repeat("semantic text\n", 200)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ROAST_MAX_PROMPT_BYTES", "512")
+	missingVerdict := filepath.Join(t.TempDir(), "engine-must-not-read-this.json")
+	var stdout, stderr bytes.Buffer
+	exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", missingVerdict}, &stdout, &stderr)
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
+	}
+	for _, expected := range []string{"ROAST-PROMPT-SIZE", "dominant.txt", "512-byte limit", "no review engine was called"} {
+		if !strings.Contains(stderr.String(), expected) {
+			t.Fatalf("stderr = %q, missing %q", stderr.String(), expected)
+		}
+	}
+	if strings.Contains(stderr.String(), "ROAST-ENGINE-FAKE") || strings.Contains(stderr.String(), "engine-must-not-read-this") {
+		t.Fatalf("fake engine was called: %s", stderr.String())
+	}
+}
+
+func TestRunReviewsLargeBinaryDeletionWithStubbedPrompt(t *testing.T) {
+	repo := initMainRepository(t)
+	binaryContent := make([]byte, 2<<20)
+	if _, err := rand.Read(binaryContent); err != nil {
+		t.Fatal(err)
+	}
+	binaryPath := filepath.Join(repo, "large.bin")
+	if err := os.WriteFile(binaryPath, binaryContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runMainGit(t, repo, "add", "large.bin")
+	runMainGit(t, repo, "commit", "-m", "large binary")
+	if err := os.Remove(binaryPath); err != nil {
+		t.Fatal(err)
+	}
+	reviewTarget, err := target.Resolve(context.Background(), target.Options{Dirty: true, RepoDir: repo, Runner: runner.ExecRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewBundle, err := bundle.Build(context.Background(), reviewTarget, runner.ExecRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewBundle.Diff) <= prompt.DefaultMaximumPromptBytes || !bytes.Contains(reviewBundle.SecretScanDiff, []byte("GIT binary patch")) {
+		t.Fatalf("raw diff = %d bytes and secret scan contains binary patch = %t", len(reviewBundle.Diff), bytes.Contains(reviewBundle.SecretScanDiff, []byte("GIT binary patch")))
+	}
+
+	responsePath := cleanResponseFixture(t, repo)
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "well done - send it.") {
+		t.Fatalf("stderr = %s", stderr.String())
 	}
 }
 

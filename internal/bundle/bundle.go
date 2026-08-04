@@ -69,10 +69,19 @@ func Build(ctx context.Context, reviewTarget target.Target, commands runner.Runn
 	return Bundle{Target: reviewTarget, Diff: diff, SecretScanDiff: secretScanDiff, SecretScanSnapshot: secretScanSnapshot, ExcludedSensitivePaths: excludedSensitivePaths, Snapshot: snapshot}, nil
 }
 
-// SanitizeDiffForPrompt replaces invalid UTF-8 sequences in review diff text
-// with U+FFFD. The raw diff remains in Bundle.Diff for bundle fingerprints and
-// local secret scanning; this function only prepares the prompt copy.
-func SanitizeDiffForPrompt(diff []byte) (string, []string) {
+// DiffContribution describes one file section's contribution to the prompt
+// copy of a diff.
+type DiffContribution struct {
+	Path  string
+	Bytes int
+}
+
+// SanitizeDiffForPrompt removes binary patch payloads and replaces invalid
+// UTF-8 sequences in review diff text with U+FFFD. The raw diff remains in
+// Bundle.Diff for bundle fingerprints and local secret scanning; this function
+// only prepares the prompt copy.
+func SanitizeDiffForPrompt(diff, snapshot []byte) (string, []string) {
+	diff = stubBinaryPatches(diff, snapshotFileSizes(snapshot))
 	if utf8.Valid(diff) {
 		return string(diff), nil
 	}
@@ -115,6 +124,166 @@ func SanitizeDiffForPrompt(diff []byte) (string, []string) {
 	}
 	sort.Strings(paths)
 	return sanitized.String(), paths
+}
+
+// PromptDiffContributions returns file sections ordered by their appearance in
+// the prompt diff. Callers may sort the result when presenting size details.
+func PromptDiffContributions(diff string) []DiffContribution {
+	sections := splitDiffSections([]byte(diff))
+	contributions := make([]DiffContribution, 0, len(sections))
+	for _, section := range sections {
+		if !bytes.HasPrefix(section, []byte("diff --git ")) {
+			continue
+		}
+		lineEnd := bytes.IndexByte(section, '\n')
+		if lineEnd < 0 {
+			lineEnd = len(section)
+		}
+		paths, ok := bundleDiffHeaderPaths(strings.TrimPrefix(string(section[:lineEnd]), "diff --git "))
+		path := "unidentified diff section"
+		if ok && len(paths) > 0 {
+			path = paths[len(paths)-1]
+		}
+		contributions = append(contributions, DiffContribution{Path: path, Bytes: len(section)})
+	}
+	return contributions
+}
+
+func stubBinaryPatches(diff []byte, snapshotSizes map[string]int) []byte {
+	sections := splitDiffSections(diff)
+	if len(sections) == 0 {
+		return diff
+	}
+	var sanitized bytes.Buffer
+	for _, section := range sections {
+		marker := []byte("GIT binary patch\n")
+		markerStart := binaryPatchMarkerStart(section)
+		if markerStart < 0 {
+			_, _ = sanitized.Write(section)
+			continue
+		}
+		operation := binaryPatchOperation(section[:markerStart])
+		path := binaryPatchPath(section[:markerStart], operation)
+		_, _ = sanitized.Write(section[:markerStart])
+		if size, ok := binaryFileSize(section[markerStart+len(marker):], operation, path, snapshotSizes); ok {
+			fmt.Fprintf(&sanitized, "Binary patch omitted: %q, %s binary, %d bytes.\n", path, operation, size)
+		} else {
+			fmt.Fprintf(&sanitized, "Binary patch omitted: %q, %s binary, file size unavailable.\n", path, operation)
+		}
+	}
+	return sanitized.Bytes()
+}
+
+func binaryPatchMarkerStart(section []byte) int {
+	offset := 0
+	for _, line := range bytes.SplitAfter(section, []byte("\n")) {
+		lineText := trimDiffPromptLine(line)
+		if strings.HasPrefix(lineText, "@@ ") {
+			return -1
+		}
+		if lineText == "GIT binary patch" {
+			return offset
+		}
+		offset += len(line)
+	}
+	return -1
+}
+
+func splitDiffSections(diff []byte) [][]byte {
+	marker := []byte("diff --git ")
+	first := nextDiffHeader(diff, 0)
+	if first < 0 {
+		return [][]byte{diff}
+	}
+	sections := make([][]byte, 0, 4)
+	if first > 0 {
+		sections = append(sections, diff[:first])
+	}
+	for start := first; start < len(diff); {
+		next := nextDiffHeader(diff, start+len(marker))
+		if next < 0 {
+			sections = append(sections, diff[start:])
+			break
+		}
+		sections = append(sections, diff[start:next])
+		start = next
+	}
+	return sections
+}
+
+func nextDiffHeader(diff []byte, searchFrom int) int {
+	if searchFrom == 0 && bytes.HasPrefix(diff, []byte("diff --git ")) {
+		return 0
+	}
+	if searchFrom >= len(diff) {
+		return -1
+	}
+	offset := bytes.Index(diff[searchFrom:], []byte("\ndiff --git "))
+	if offset < 0 {
+		return -1
+	}
+	return searchFrom + offset + 1
+}
+
+func binaryPatchOperation(header []byte) string {
+	switch {
+	case bytes.Contains(header, []byte("\nnew file mode ")):
+		return "added"
+	case bytes.Contains(header, []byte("\ndeleted file mode ")):
+		return "deleted"
+	default:
+		return "modified"
+	}
+}
+
+func binaryPatchPath(header []byte, operation string) string {
+	lineEnd := bytes.IndexByte(header, '\n')
+	if lineEnd < 0 {
+		lineEnd = len(header)
+	}
+	paths, ok := bundleDiffHeaderPaths(strings.TrimPrefix(string(header[:lineEnd]), "diff --git "))
+	if !ok || len(paths) == 0 {
+		return "unidentified binary file"
+	}
+	if operation == "deleted" {
+		return paths[0]
+	}
+	return paths[len(paths)-1]
+}
+
+type binaryPatchHeader struct {
+	kind string
+	size int
+}
+
+func binaryFileSize(payload []byte, operation, path string, snapshotSizes map[string]int) (int, bool) {
+	headers := make([]binaryPatchHeader, 0, 2)
+	for _, line := range strings.Split(string(payload), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || (fields[0] != "literal" && fields[0] != "delta") {
+			continue
+		}
+		size, err := strconv.Atoi(fields[1])
+		if err == nil {
+			headers = append(headers, binaryPatchHeader{kind: fields[0], size: size})
+		}
+	}
+	if operation != "deleted" {
+		if size, ok := snapshotSizes[path]; ok {
+			return size, true
+		}
+	}
+	if len(headers) == 0 {
+		return 0, false
+	}
+	selected := headers[0]
+	if operation == "deleted" {
+		selected = headers[len(headers)-1]
+	}
+	if selected.kind != "literal" {
+		return 0, false
+	}
+	return selected.size, true
 }
 
 func trimDiffPromptLine(line []byte) string {
@@ -651,14 +820,20 @@ func diffSectionHasSensitivePath(section []byte) (bool, []string, error) {
 }
 
 func bundleDiffHeaderPaths(header string) ([]string, bool) {
-	header = strings.TrimLeft(header, " \t")
+	header = strings.TrimLeft(strings.TrimSuffix(header, "\r"), " \t")
 	if strings.HasPrefix(header, `"`) {
 		oldPath, remainder, ok := readBundleGitPath(header)
 		if !ok {
 			return nil, false
 		}
-		newPath, _, ok := readBundleGitPath(remainder)
-		if !ok {
+		remainder = strings.TrimLeft(remainder, " \t")
+		newPath := remainder
+		if strings.HasPrefix(remainder, `"`) {
+			newPath, remainder, ok = readBundleGitPath(remainder)
+		} else {
+			remainder = ""
+		}
+		if !ok || strings.TrimSpace(remainder) != "" {
 			return nil, false
 		}
 		paths := make([]string, 0, 2)
@@ -670,21 +845,47 @@ func bundleDiffHeaderPaths(header string) ([]string, bool) {
 		}
 		return paths, len(paths) > 0
 	}
-	separator := strings.Index(header, ` "b/`)
-	if separator < 0 {
-		separator = strings.Index(header, " b/")
+	for start := 0; start < len(header); {
+		relative := strings.Index(header[start:], ` "b/`)
+		if relative < 0 {
+			break
+		}
+		separator := start + relative
+		newPath, remainder, ok := readBundleGitPath(header[separator+1:])
+		if ok && strings.TrimSpace(remainder) == "" {
+			oldName, oldValid := bundleDiffPath(header[:separator], "a/")
+			newName, newValid := bundleDiffPath(newPath, "b/")
+			if oldValid && newValid {
+				return []string{oldName, newName}, true
+			}
+		}
+		start = separator + 1
 	}
-	if separator < 0 {
-		return nil, false
+	var firstPaths []string
+	candidates := 0
+	for start := 0; start < len(header); {
+		relative := strings.Index(header[start:], " b/")
+		if relative < 0 {
+			break
+		}
+		separator := start + relative
+		oldName, oldValid := bundleDiffPath(header[:separator], "a/")
+		newName, newValid := bundleDiffPath(header[separator+1:], "b/")
+		if oldValid && newValid {
+			if oldName == newName {
+				return []string{oldName, newName}, true
+			}
+			if candidates == 0 {
+				firstPaths = []string{oldName, newName}
+			}
+			candidates++
+		}
+		start = separator + 1
 	}
-	paths := make([]string, 0, 2)
-	if name, valid := bundleDiffPath(header[:separator], "a/"); valid {
-		paths = append(paths, name)
+	if candidates == 1 {
+		return firstPaths, true
 	}
-	if name, valid := bundleDiffPath(header[separator+1:], "b/"); valid {
-		paths = append(paths, name)
-	}
-	return paths, len(paths) > 0
+	return nil, false
 }
 
 func bundleDiffPath(value, prefix string) (string, bool) {
