@@ -72,9 +72,12 @@ the repository so review artifacts never become reviewed source), and
 
 Two things worth knowing up front. Reviews spend tokens through your own CLI
 subscription or API key — that's the deal with an AI reviewer, and roast
-doesn't add a meter on top. And there's no diff chunking: a huge branch makes
-a huge prompt, so split it. Reviewing one task's diff at a time is the
-intended use anyway.
+doesn't add a meter on top. And there's no diff chunking: binary patch payloads
+are omitted because a reviewer cannot inspect them, but a huge text branch can
+still make a huge prompt. Roast stops before calling the engine when the prompt
+exceeds 1 MiB (`ROAST_MAX_PROMPT_BYTES` overrides that guard), so split
+mechanical changes into their own commit and review the semantic commit.
+Reviewing one task's diff at a time is the intended use anyway.
 
 ## Agents
 

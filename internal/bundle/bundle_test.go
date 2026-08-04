@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -23,7 +24,7 @@ func TestSanitizeDiffForPromptReplacesInvalidUTF8AndNamesFiles(t *testing.T) {
 	diff = append(diff, []byte("sum")...)
 	diff = append(diff, 0xe9, '\n')
 
-	sanitized, paths := SanitizeDiffForPrompt(diff)
+	sanitized, paths := SanitizeDiffForPrompt(diff, nil)
 	if !utf8.ValidString(sanitized) {
 		t.Fatalf("sanitized diff is not valid UTF-8: %q", sanitized)
 	}
@@ -37,12 +38,110 @@ func TestSanitizeDiffForPromptReplacesInvalidUTF8AndNamesFiles(t *testing.T) {
 
 func TestSanitizeDiffForPromptPreservesValidDiff(t *testing.T) {
 	diff := []byte("diff --git a/main.go b/main.go\n@@ -1 +1 @@\n-package main\n+package review\n")
-	got, paths := SanitizeDiffForPrompt(diff)
+	got, paths := SanitizeDiffForPrompt(diff, nil)
 	if got != string(diff) {
 		t.Fatalf("sanitized valid diff = %q, want original", got)
 	}
 	if len(paths) != 0 {
 		t.Fatalf("invalid UTF-8 paths = %#v, want none", paths)
+	}
+}
+
+func TestSanitizeDiffForPromptStubsBinaryDeletionWithoutChangingRawDiff(t *testing.T) {
+	raw := []byte("diff --git a/assets/large.bin b/assets/large.bin\ndeleted file mode 100644\nindex 1111111..0000000\nGIT binary patch\nliteral 0\nHcmV?d00001\n\nliteral 2097152\nzcmeIuencoded-payload\n")
+	original := append([]byte(nil), raw...)
+
+	sanitized, invalidPaths := SanitizeDiffForPrompt(raw, nil)
+	if len(invalidPaths) != 0 {
+		t.Fatalf("invalid paths = %#v, want none", invalidPaths)
+	}
+	want := "diff --git a/assets/large.bin b/assets/large.bin\ndeleted file mode 100644\nindex 1111111..0000000\nBinary patch omitted: \"assets/large.bin\", deleted binary, 2097152 bytes.\n"
+	if sanitized != want {
+		t.Fatalf("sanitized diff = %q, want %q", sanitized, want)
+	}
+	if !bytes.Equal(raw, original) || !bytes.Contains(raw, []byte("zcmeIuencoded-payload")) {
+		t.Fatalf("raw diff was changed: %q", raw)
+	}
+}
+
+func TestSanitizeDiffForPromptNamesAddedAndModifiedBinarySizes(t *testing.T) {
+	tests := []struct {
+		name     string
+		diff     string
+		expected string
+	}{
+		{name: "added", diff: "diff --git a/new.bin b/new.bin\nnew file mode 100644\nGIT binary patch\nliteral 12\nencoded\n", expected: `"new.bin", added binary, 12 bytes`},
+		{name: "modified delta", diff: "diff --git a/image.bin b/image.bin\nindex 111..222\nGIT binary patch\ndelta 24\nencoded-new\n\nliteral 20\nencoded-old\n", expected: `"image.bin", modified binary, file size unavailable`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sanitized, _ := SanitizeDiffForPrompt([]byte(test.diff), nil)
+			if !strings.Contains(sanitized, test.expected) || strings.Contains(sanitized, "encoded") {
+				t.Fatalf("sanitized diff = %q, want %q without payload", sanitized, test.expected)
+			}
+		})
+	}
+}
+
+func TestSanitizeDiffForPromptUsesSnapshotSizeForDeltaPatch(t *testing.T) {
+	var snapshot bytes.Buffer
+	archive := tar.NewWriter(&snapshot)
+	content := bytes.Repeat([]byte{0}, 1<<20)
+	if err := archive.WriteHeader(&tar.Header{Name: "image.bin", Mode: 0o600, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archive.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	diff := []byte("diff --git a/image.bin b/image.bin\nindex 111..222\nGIT binary patch\ndelta 24\nencoded-new\n\ndelta 20\nencoded-old\n")
+
+	sanitized, _ := SanitizeDiffForPrompt(diff, snapshot.Bytes())
+	if !strings.Contains(sanitized, `"image.bin", modified binary, 1048576 bytes`) || strings.Contains(sanitized, "24 bytes") {
+		t.Fatalf("sanitized diff = %q", sanitized)
+	}
+}
+
+func TestSanitizeDiffForPromptParsesBinaryPathContainingBPrefix(t *testing.T) {
+	var snapshot bytes.Buffer
+	archive := tar.NewWriter(&snapshot)
+	content := bytes.Repeat([]byte{0}, 1024)
+	if err := archive.WriteHeader(&tar.Header{Name: "assets b/image.bin", Mode: 0o600, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archive.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	diff := []byte("diff --git a/assets b/image.bin b/assets b/image.bin\nindex 111..222\nGIT binary patch\ndelta 24\nencoded-new\n\ndelta 20\nencoded-old\n")
+
+	sanitized, _ := SanitizeDiffForPrompt(diff, snapshot.Bytes())
+	if !strings.Contains(sanitized, `"assets b/image.bin", modified binary, 1024 bytes`) {
+		t.Fatalf("sanitized diff = %q", sanitized)
+	}
+}
+
+func TestSanitizeDiffForPromptDoesNotTreatTextHunkAsBinaryPatch(t *testing.T) {
+	diff := []byte("diff --git a/review.txt b/review.txt\nindex 111..222 100644\n--- a/review.txt\n+++ b/review.txt\n@@ -1 +1,3 @@\n old\n+GIT binary patch\n+semantic change after marker text\n")
+
+	sanitized, _ := SanitizeDiffForPrompt(diff, nil)
+	if sanitized != string(diff) {
+		t.Fatalf("sanitized text diff = %q, want unchanged %q", sanitized, diff)
+	}
+}
+
+func TestPromptDiffContributionsReportsSanitizedSectionBytes(t *testing.T) {
+	diff := "diff --git a/small.go b/small.go\n+x\ndiff --git a/large.go b/large.go\n+much larger\n"
+	contributions := PromptDiffContributions(diff)
+	if len(contributions) != 2 || contributions[0].Path != "small.go" || contributions[1].Path != "large.go" {
+		t.Fatalf("contributions = %#v", contributions)
+	}
+	if contributions[0].Bytes != len("diff --git a/small.go b/small.go\n+x\n") || contributions[1].Bytes != len("diff --git a/large.go b/large.go\n+much larger\n") {
+		t.Fatalf("contribution bytes = %#v", contributions)
 	}
 }
 

@@ -47,6 +47,49 @@ func TestAssembleSubstitutesEvidenceAndRejectsUnknownMarkers(t *testing.T) {
 	}
 }
 
+func TestMaximumPromptBytesUsesDefaultAndValidatesOverride(t *testing.T) {
+	if got, err := MaximumPromptBytes(""); err != nil || got != DefaultMaximumPromptBytes {
+		t.Fatalf("default = %d, error = %v", got, err)
+	}
+	if got, err := MaximumPromptBytes(" 2097152 "); err != nil || got != 2097152 {
+		t.Fatalf("override = %d, error = %v", got, err)
+	}
+	if _, err := MaximumPromptBytes("many"); err == nil || !strings.Contains(err.Error(), "ROAST-PROMPT-SIZE-CONFIG") || !strings.Contains(err.Error(), "ROAST_MAX_PROMPT_BYTES=2097152") {
+		t.Fatalf("invalid override error = %v", err)
+	}
+}
+
+func TestValidateSizeNamesFiveLargestDiffContributions(t *testing.T) {
+	contributions := []DiffContribution{
+		{Path: "sixth.go", Bytes: 1},
+		{Path: "first.go", Bytes: 60},
+		{Path: "second.go", Bytes: 50},
+		{Path: "third.go", Bytes: 40},
+		{Path: "fourth.go", Bytes: 30},
+		{Path: "fifth.go", Bytes: 20},
+	}
+	err := ValidateSize(strings.Repeat("x", 101), SizeBudget{MaximumBytes: 100}, contributions)
+	if err == nil {
+		t.Fatal("oversized prompt passed validation")
+	}
+	message := err.Error()
+	for _, expected := range []string{"ROAST-PROMPT-SIZE", "101 bytes", "100-byte limit", `"first.go": 60 bytes`, `"fifth.go": 20 bytes`, "split mechanical changes into their own commit and review the semantic commit", "no review engine was called"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("error = %q, missing %q", message, expected)
+		}
+	}
+	if strings.Contains(message, "sixth.go") {
+		t.Fatalf("error includes more than five contributions: %s", message)
+	}
+	if err := ValidateSize("small", SizeBudget{MaximumBytes: 5}, nil); err != nil {
+		t.Fatalf("prompt at limit failed: %v", err)
+	}
+	reserved := ValidateSize("small", SizeBudget{MaximumBytes: 5, ReservedBytes: 1}, nil)
+	if reserved == nil || !strings.Contains(reserved.Error(), "1 more bytes reserved") || !strings.Contains(reserved.Error(), "6 bytes total") {
+		t.Fatalf("reserved budget error = %v", reserved)
+	}
+}
+
 func TestContextDocumentsSelectsNamedAndGlobFiles(t *testing.T) {
 	snapshot := makeSnapshot(t, map[string]string{
 		"PROJECT.md":      "project\n",

@@ -31,6 +31,9 @@ func (engine *ClaudeEngine) Preflight() error {
 }
 
 func (engine *ClaudeEngine) Review(ctx context.Context, request Request) ([]byte, error) {
+	if err := validatePromptBudget(request); err != nil {
+		return nil, err
+	}
 	if err := ValidateThinking(EngineClaude, engine.options.Thinking); err != nil {
 		return nil, err
 	}

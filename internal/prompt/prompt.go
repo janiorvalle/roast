@@ -7,6 +7,7 @@ import (
 	"io"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -20,6 +21,68 @@ const (
 	extraPromptPlaceholder        = "{{EXTRA_PROMPT}}"
 	diffPlaceholder               = "{{DIFF}}"
 )
+
+const DefaultMaximumPromptBytes = 1 << 20
+
+type DiffContribution struct {
+	Path  string
+	Bytes int
+}
+
+type SizeBudget struct {
+	MaximumBytes  int
+	ReservedBytes int
+}
+
+// MaximumPromptBytes resolves the prompt limit from ROAST_MAX_PROMPT_BYTES.
+func MaximumPromptBytes(configured string) (int, error) {
+	configured = strings.TrimSpace(configured)
+	if configured == "" {
+		return DefaultMaximumPromptBytes, nil
+	}
+	limit, err := strconv.Atoi(configured)
+	if err != nil || limit <= 0 {
+		return 0, fmt.Errorf("[ROAST-PROMPT-SIZE-CONFIG] ROAST_MAX_PROMPT_BYTES=%q is not a positive byte count; set a value such as ROAST_MAX_PROMPT_BYTES=2097152 and retry", configured)
+	}
+	return limit, nil
+}
+
+// ValidateSize rejects prompts that the selected CLI is unlikely to accept.
+func ValidateSize(assembled string, budget SizeBudget, contributions []DiffContribution) error {
+	return validateSize(assembled, budget, contributions, "no review engine was called")
+}
+
+// ValidateRetrySize rejects an oversized validator retry without implying that
+// the initial engine call did not happen.
+func ValidateRetrySize(assembled string, budget SizeBudget, contributions []DiffContribution) error {
+	return validateSize(assembled, budget, contributions, "the oversized retry was not sent to the review engine")
+}
+
+func validateSize(assembled string, budget SizeBudget, contributions []DiffContribution, outcome string) error {
+	requiredBytes := len(assembled) + budget.ReservedBytes
+	if requiredBytes <= budget.MaximumBytes {
+		return nil
+	}
+	ordered := append([]DiffContribution(nil), contributions...)
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].Bytes == ordered[j].Bytes {
+			return ordered[i].Path < ordered[j].Path
+		}
+		return ordered[i].Bytes > ordered[j].Bytes
+	})
+	if len(ordered) > 5 {
+		ordered = ordered[:5]
+	}
+	var details strings.Builder
+	for _, contribution := range ordered {
+		fmt.Fprintf(&details, "\n  %q: %d bytes", contribution.Path, contribution.Bytes)
+	}
+	sizeDescription := fmt.Sprintf("assembled review prompt is %d bytes", len(assembled))
+	if budget.ReservedBytes > 0 {
+		sizeDescription += fmt.Sprintf(" and needs %d more bytes reserved for its required validator retry (%d bytes total)", budget.ReservedBytes, requiredBytes)
+	}
+	return fmt.Errorf("[ROAST-PROMPT-SIZE] %s, above the %d-byte limit; largest diff contributions:%s\nsplit mechanical changes into their own commit and review the semantic commit, or set ROAST_MAX_PROMPT_BYTES to a larger limit supported by the selected engine; %s", sizeDescription, budget.MaximumBytes, details.String(), outcome)
+}
 
 // Document is a project document included as evidence in the review prompt.
 type Document struct {

@@ -45,6 +45,9 @@ func (engine *CodexEngine) Preflight() error {
 }
 
 func (engine *CodexEngine) Review(ctx context.Context, request Request) ([]byte, error) {
+	if err := validatePromptBudget(request); err != nil {
+		return nil, err
+	}
 	if err := ValidateThinking(EngineCodex, engine.options.Thinking); err != nil {
 		return nil, err
 	}

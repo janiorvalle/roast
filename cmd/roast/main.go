@@ -232,7 +232,7 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 	if notice := contextSelection.ExclusionNotice(); notice != "" {
 		fmt.Fprintf(stderr, "roast: %s\n", notice)
 	}
-	promptDiff, invalidDiffPaths := bundle.SanitizeDiffForPrompt(reviewBundle.Diff)
+	promptDiff, invalidDiffPaths := bundle.SanitizeDiffForPrompt(reviewBundle.Diff, reviewBundle.Snapshot)
 	if len(invalidDiffPaths) > 0 {
 		displayedPaths := make([]string, 0, len(invalidDiffPaths))
 		for _, path := range invalidDiffPaths {
@@ -280,6 +280,26 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 		fmt.Fprintf(stderr, "roast: %v\n", err)
 		return 1
 	}
+	maximumPromptBytes, err := prompt.MaximumPromptBytes(os.Getenv("ROAST_MAX_PROMPT_BYTES"))
+	if err != nil {
+		fmt.Fprintf(stderr, "roast: %v\n", err)
+		return 1
+	}
+	bundleContributions := bundle.PromptDiffContributions(promptDiff)
+	promptContributions := make([]prompt.DiffContribution, 0, len(bundleContributions))
+	for _, contribution := range bundleContributions {
+		promptContributions = append(promptContributions, prompt.DiffContribution{Path: contribution.Path, Bytes: contribution.Bytes})
+	}
+	promptToMeasure := reviewPrompt
+	sizeBudget := prompt.SizeBudget{MaximumBytes: maximumPromptBytes}
+	if *engineName != "fake" {
+		promptToMeasure = engine.PromptWithProvenance(reviewPrompt, provenance)
+		sizeBudget.ReservedBytes = engine.RetryPromptReserveBytes()
+	}
+	if err := prompt.ValidateSize(promptToMeasure, sizeBudget, promptContributions); err != nil {
+		fmt.Fprintf(stderr, "roast: %v\n", err)
+		return 1
+	}
 	if *engineName != "fake" {
 		if preflight, ok := selectedEngine.(engine.PreflightEngine); ok {
 			if err := preflight.Preflight(); err != nil {
@@ -322,6 +342,8 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 			AllowedFiles:       snapshotFiles,
 			SnapshotLineCounts: lineCounts,
 			DiffLineRanges:     diffRanges,
+			MaximumPromptBytes: maximumPromptBytes,
+			DiffContributions:  promptContributions,
 		})
 	}
 	if cleanupSnapshot != nil {
