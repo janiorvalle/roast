@@ -97,12 +97,14 @@ func TestRunUpgradesVerifiedBinaryAndRefreshesSkills(t *testing.T) {
 	if requests != 3 || !verified || !refreshed {
 		t.Fatalf("requests = %d, verified = %t, refreshed = %t", requests, verified, refreshed)
 	}
-	info, err := os.Stat(destination)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if permissions := info.Mode().Perm(); permissions != 0o700 {
-		t.Fatalf("permissions = %o, want 700", permissions)
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(destination)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if permissions := info.Mode().Perm(); permissions != 0o700 {
+			t.Fatalf("permissions = %o, want 700", permissions)
+		}
 	}
 	for _, expected := range []string{"version: 0.2.3 -> 0.2.4", "binary updated at", "Codex skill updated at"} {
 		if !strings.Contains(output.String(), expected) {
