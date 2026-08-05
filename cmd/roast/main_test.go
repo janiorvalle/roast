@@ -83,6 +83,58 @@ func TestRunVersionDoesNotInstallSkill(t *testing.T) {
 	}
 }
 
+func TestRunUpgradeUsesEmbeddedVersion(t *testing.T) {
+	called := false
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies([]string{"upgrade"}, &stdout, &stderr, runDependencies{
+		upgrade: func(_ context.Context, currentVersion string, output io.Writer) error {
+			called = true
+			if currentVersion != version {
+				t.Fatalf("current version = %q", currentVersion)
+			}
+			_, err := io.WriteString(output, "upgrade complete\n")
+			return err
+		},
+	})
+	if exitCode != 0 || !called || stdout.String() != "upgrade complete\n" || stderr.Len() != 0 {
+		t.Fatalf("exit code = %d, called = %t, stdout = %q, stderr = %q", exitCode, called, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunUpgradeRejectsArgumentsBeforeNetworkCall(t *testing.T) {
+	called := false
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies([]string{"upgrade", "--force"}, &stdout, &stderr, runDependencies{
+		upgrade: func(context.Context, string, io.Writer) error {
+			called = true
+			return nil
+		},
+	})
+	if exitCode != 2 || called || !strings.Contains(stderr.String(), "ROAST-UPGRADE-ARGS") {
+		t.Fatalf("exit code = %d, called = %t, stderr = %q", exitCode, called, stderr.String())
+	}
+}
+
+func TestRunUpgradeReportsActionableFailure(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies([]string{"upgrade"}, &stdout, &stderr, runDependencies{
+		upgrade: func(context.Context, string, io.Writer) error {
+			return errors.New("[ROAST-UPGRADE-RELEASE] offline; retry")
+		},
+	})
+	if exitCode != 1 || !strings.Contains(stderr.String(), "[ROAST-UPGRADE-RELEASE] offline; retry") {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+}
+
+func TestRunUpgradeCleanupRejectsUnexpectedPath(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies([]string{"__upgrade-cleanup", filepath.Join(t.TempDir(), "unrelated"), "123"}, &stdout, &stderr, runDependencies{})
+	if exitCode != 1 || !strings.Contains(stderr.String(), "ROAST-UPGRADE-CLEANUP") || !strings.Contains(stderr.String(), "refusing unexpected backup path") {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+}
+
 func TestRunStopsBeforeEngineWhenSecretGateFails(t *testing.T) {
 	repo := initMainRepository(t)
 	writeMainChange(t, repo)
