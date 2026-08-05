@@ -55,7 +55,7 @@ func TestRunUpgradesVerifiedBinaryAndRefreshesSkills(t *testing.T) {
 		}
 		return response(http.StatusOK, []byte(content)), nil
 	})}
-	destination := filepath.Join(t.TempDir(), "roast")
+	destination := filepath.Join(t.TempDir(), testBinaryName())
 	if err := os.WriteFile(destination, []byte("old roast binary"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -366,4 +366,11 @@ func replacementBinary(t *testing.T, fallback []byte) []byte {
 		t.Fatal(err)
 	}
 	return content
+}
+
+func testBinaryName() string {
+	if runtime.GOOS == "windows" {
+		return "roast.exe"
+	}
+	return "roast"
 }
