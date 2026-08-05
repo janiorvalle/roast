@@ -25,6 +25,7 @@ import (
 	"github.com/janiorvalle/roast/internal/secrets"
 	"github.com/janiorvalle/roast/internal/skill"
 	"github.com/janiorvalle/roast/internal/target"
+	"github.com/janiorvalle/roast/internal/upgrade"
 	"github.com/janiorvalle/roast/internal/verdict"
 )
 
@@ -41,6 +42,7 @@ type runDependencies struct {
 	scanSecrets  func(context.Context, target.Target, []byte, []byte, runner.Runner) error
 	installSkill func(io.Writer, string) error
 	repairSkill  func(io.Writer, bool) error
+	upgrade      func(context.Context, string, io.Writer) error
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -49,6 +51,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		scanSecrets:  secrets.Scan,
 		installSkill: skill.AutoInstallForRepository,
 		repairSkill:  skill.Repair,
+		upgrade:      upgrade.Run,
 	})
 }
 
@@ -70,6 +73,16 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 			installer = func(io.Writer, bool) error { return nil }
 		}
 		return runInstallSkill(args[1:], stdout, stderr, installer)
+	}
+	if len(args) > 0 && args[0] == "__upgrade-cleanup" {
+		return runUpgradeCleanup(ctx, args[1:], stderr)
+	}
+	if len(args) > 0 && args[0] == "upgrade" {
+		upgrader := dependencies.upgrade
+		if upgrader == nil {
+			upgrader = upgrade.Run
+		}
+		return runUpgrade(ctx, args[1:], stdout, stderr, upgrader)
 	}
 	if dependencies.installSkill == nil {
 		dependencies.installSkill = func(io.Writer, string) error { return nil }
@@ -418,6 +431,35 @@ func runInstallSkill(args []string, stdout, stderr io.Writer, installer func(io.
 		return 2
 	}
 	if err := installer(stdout, force); err != nil {
+		fmt.Fprintf(stderr, "roast: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runUpgrade(ctx context.Context, args []string, stdout, stderr io.Writer, upgrader func(context.Context, string, io.Writer) error) int {
+	if len(args) != 0 {
+		fmt.Fprintf(stderr, "roast: [ROAST-UPGRADE-ARGS] upgrade accepts no arguments; use `roast upgrade`\n")
+		return 2
+	}
+	if err := upgrader(ctx, version, stdout); err != nil {
+		fmt.Fprintf(stderr, "roast: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runUpgradeCleanup(ctx context.Context, args []string, stderr io.Writer) int {
+	if len(args) != 2 {
+		fmt.Fprintln(stderr, "roast: [ROAST-UPGRADE-CLEANUP] internal cleanup expected a backup path and parent process ID; rerun `roast upgrade`")
+		return 2
+	}
+	parentProcessID, err := strconv.Atoi(args[1])
+	if err != nil {
+		fmt.Fprintf(stderr, "roast: [ROAST-UPGRADE-CLEANUP] parent process ID %q is invalid; expected a positive integer; rerun `roast upgrade`\n", args[1])
+		return 2
+	}
+	if err := upgrade.CleanupPreviousExecutable(ctx, args[0], parentProcessID); err != nil {
 		fmt.Fprintf(stderr, "roast: %v\n", err)
 		return 1
 	}

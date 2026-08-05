@@ -18,10 +18,13 @@ working tree because that is the change under review.
 Review content does leave your machine — that is the product. The diff, the
 tracked-file snapshot, and any project documents selected as context are
 handed to the Codex or Claude CLI you chose, which sends them to its model
-provider under your existing account. roast adds no network calls, telemetry,
-or credential handling of its own; engine CLIs run with your login, with
-project configuration, hooks, MCP servers, and skills disabled, and with read
-access scoped to the snapshot.
+provider under your existing account. During reviews, roast adds no telemetry
+or network calls beyond those named here. For Codex, roast reads `auth.json`
+and stages a refresh-token-free copy in a temporary home; when the cached access
+token is expiring, Codex's native `account/read` flow may refresh the source
+login before staging. Engine CLIs otherwise run with your login, with project
+configuration, hooks, MCP servers, and skills disabled, and with read access
+scoped to the snapshot.
 
 Before the review engine runs, TruffleHog scans the complete pre- and
 post-change content. Its verification step may contact credential providers'
@@ -31,10 +34,13 @@ Environment files and credential stores are excluded from review bundles
 entirely; a change that touches one stops the review. Every failure path in
 the pipeline fails closed — a missing review can never approve a change.
 
-`install.sh` is the installer's only network touchpoint: it downloads release
-archives and checksums from GitHub (or an explicit mirror), verifies SHA-256,
-and installs one binary without sudo. The skill installer writes only under
-existing Claude Code and Codex skill directories.
+Release installation has two explicit network paths. `install.sh` downloads a
+release archive and `checksums.txt` from GitHub or an explicit mirror. `roast
+upgrade` queries `api.github.com/repos/janiorvalle/roast/releases/latest`, then
+downloads the named archive and `checksums.txt` from that release's GitHub asset
+URLs. Both paths verify the archive's SHA-256 before replacing the binary, and
+neither uses sudo. The skill installer writes only under existing Claude Code
+and Codex skill directories.
 
 Reports are most useful when they include the affected version, concrete
 impact, and a minimal reproduction. Scanner output without an impact path is
