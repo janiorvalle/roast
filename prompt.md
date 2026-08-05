@@ -52,14 +52,20 @@ fix-test-review cycle after every round, so a defect you noticed but held back
 doubles their bill. Before answering, take one last look at the files you only
 skimmed after your first discovery — reviewers tend to stop hunting too early.
 
+A false or inflated finding costs the caller that same full cycle. Report a
+finding only when you would stake the review on it — when the failure scenario
+is concrete enough that a verifier could reproduce or refute it in minutes.
+Findings that share one root cause are one finding.
+
 Priorities:
 
 - **P0** — data loss, crash, security exposure, broken build/install, or the
   change simply does not do what it claims.
 - **P1** — incorrect behavior in realistic use: logic errors, race conditions,
-  unhandled failure paths, broken cross-file contracts.
+  unhandled failure paths that realistic use actually reaches, broken
+  cross-file contracts.
 - **P2** — real defect with narrower blast radius: mishandled edge case,
-  resource leak, misleading error, trap for the next maintainer.
+  resource leak, misleading error.
 - **P3** — polish: naming, clarity, minor duplication.
 
 Report only {{INCLUDED_PRIORITIES}} findings. Everything below the threshold —
@@ -87,7 +93,9 @@ surrounding prose. It must match this schema:
 - Every finding carries `file` and `line` pinpointing the tightest location in
   the snapshot or reviewed diff that shows the problem, a one-line `title`, and a `rationale`
   containing the concrete failure scenario (inputs/state → wrong outcome). A
-  finding without a failure scenario is an opinion; leave it out.
+  finding without a failure scenario is an opinion; leave it out. Write `title`
+  and `rationale` in plain language for a developer skimming a list — one
+  sentence each, naming the concrete wrong outcome, no reviewer jargon.
 - `suggestion` is optional: the smallest reasonable fix direction, not a
   rewrite.
 - If there are no actionable findings, return an empty findings array and
