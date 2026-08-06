@@ -426,7 +426,7 @@ func TestRunFakeEngineFiltersAndFailsOnIncludedFinding(t *testing.T) {
 	writeVerdictFixture(t, responsePath, verdict.Verdict{
 		Overall: verdict.OverallRaw,
 		Findings: []verdict.Finding{
-			{Priority: verdict.PriorityP2, File: "base.txt", Line: 1, Title: "real defect", Rationale: "the input reaches a wrong result"},
+			{Priority: verdict.PriorityP1, File: "base.txt", Line: 1, Title: "real defect", Rationale: "the input reaches a wrong result"},
 		},
 		Provenance: provenance,
 	})
@@ -435,7 +435,7 @@ func TestRunFakeEngineFiltersAndFailsOnIncludedFinding(t *testing.T) {
 	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 1 {
 		t.Fatalf("raw exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "RAW.") || !strings.Contains(stderr.String(), "P2 base.txt:1: real defect") {
+	if !strings.Contains(stderr.String(), "RAW.") || !strings.Contains(stderr.String(), "P1 base.txt:1: real defect") {
 		t.Fatalf("stderr = %s", stderr.String())
 	}
 }
@@ -476,7 +476,7 @@ func TestRunReportsCopyableProvenanceMismatch(t *testing.T) {
 	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--plain", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 1 {
 		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), `context: snapshot + 0 project docs []; priorities=P0, P1, P2; context-glob=""; extra-prompt=""; isolation=fake`) {
+	if !strings.Contains(stderr.String(), `context: snapshot + 0 project docs []; priorities=P0, P1; context-glob=""; extra-prompt=""; isolation=fake`) {
 		t.Fatalf("stderr = %s", stderr.String())
 	}
 	if strings.Contains(stderr.String(), `\"`) {
@@ -620,7 +620,7 @@ func testProvenance(t *testing.T, repo string) verdict.Provenance {
 		Branch:  "WORKTREE",
 		Tree:    bundleFingerprint(reviewBundle),
 		Engine:  "fake/canned",
-		Context: contextWithIsolation(nil, verdict.PriorityP2, "", "", "fake"),
+		Context: contextWithIsolation(nil, verdict.PriorityP1, "", "", "fake"),
 	}
 }
 

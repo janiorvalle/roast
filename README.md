@@ -65,7 +65,7 @@ P0 auth.go:4: Every user is granted administrator status
 ```
 
 Useful flags: `--engine codex|claude`, `--model` and `--thinking` for
-per-engine overrides, `--max-priority P0|P1|P2|P3` (default P2),
+per-engine overrides, `--max-priority P0|P1|P2|P3` (default P1),
 `--json-output <path>` for the full verdict as JSON (the path must be outside
 the repository so review artifacts never become reviewed source), and
 `--plain` for CI logs without the chef voice.
