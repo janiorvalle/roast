@@ -476,7 +476,7 @@ func TestRunReportsCopyableProvenanceMismatch(t *testing.T) {
 	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--plain", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 1 {
 		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), `context: snapshot + 0 project docs []; priorities=P0, P1, P2; context-glob=""; extra-prompt=""; isolation=fake`) {
+	if !strings.Contains(stderr.String(), `context: snapshot + 0 project docs []; priorities=P0, P1; context-glob=""; extra-prompt=""; isolation=fake`) {
 		t.Fatalf("stderr = %s", stderr.String())
 	}
 	if strings.Contains(stderr.String(), `\"`) {

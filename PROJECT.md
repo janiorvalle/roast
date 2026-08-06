@@ -40,7 +40,7 @@ to the code, zero obedience to its configuration.
    flags on (ignore user/project config, no hooks, no MCP, no skills). It must
    return one JSON object matching a strict verdict schema.
 5. **Verdict** — validate the JSON (schema + every finding must point at a
-   real file), filter by priority threshold (default P2), print findings,
+   real file), filter by priority threshold (default P1), print findings,
    exit 0/1. Heartbeats to stderr while the engine thinks. Tree fingerprint
    before/after so a verdict can never refer to a tree that changed mid-run.
 
@@ -60,7 +60,7 @@ auto-applied), fixes what's real, reruns until exit 0.
 | 6 | **Engine config isolation stays on** (ignore user/project config, no hooks/MCP/skills in the reviewer) | Independence is the product. Cheap to keep even in sighted mode. |
 | 7 | Secrets: **TruffleHog only**, fail closed | Do not build a homegrown secret analyzer — it becomes a permanent maintenance tax. If TruffleHog misses a pattern, upstream it. |
 | 8 | Two engine adapters: **codex** and **claude** | The ones actually in use. Small adapter interface; others can be PRs. No matrix of stub engines. |
-| 9 | **Strict verdict contract**: JSON schema, findings-reference-real-files check, priority threshold (default P2), exit codes | The crown jewel — makes "loop until clean" mechanical instead of vibes. One default, one config file. |
+| 9 | **Strict verdict contract**: JSON schema, findings-reference-real-files check, priority threshold (default P1), exit codes | The crown jewel — makes "loop until clean" mechanical instead of vibes. One default, one config file. |
 | 10 | Keep the cheap reliability details: heartbeats, tree-fingerprint staleness check, scope-governor rules in the skill | Tiny cost, real value. Review is a closeout gate, not permission to rewrite the task. |
 | 11 | No persistence: **no findings ledger, no accept/reject recording** | The agent judges findings in conversation, per the skill contract. Keep it simple. |
 | 12 | Skill ships with the CLI, **< 100 lines** | Contract + loop + scope governor. No path ceremony (binary is on PATH). |
@@ -106,7 +106,7 @@ roast --commit HEAD        # one commit
 roast 4691                 # PR via gh
   --engine codex|claude    # default codex
   --model / --thinking     # per-engine overrides (env: ROAST_MODEL, ...)
-  --max-priority P0|P1|P2|P3   # default P2
+  --max-priority P0|P1|P2|P3   # default P1
   --json-output <path>     # verdict JSON for tooling
   --plain                  # no chef theater (CI logs)
 ```

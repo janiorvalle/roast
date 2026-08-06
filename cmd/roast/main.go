@@ -98,7 +98,7 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 	engineName := flags.String("engine", engine.EngineCodex, "review engine: codex, claude, or fake")
 	model := flags.String("model", "", "review model (also ROAST_MODEL or ROAST_<ENGINE>_MODEL)")
 	thinking := flags.String("thinking", "", "review thinking/effort level (also ROAST_THINKING or ROAST_<ENGINE>_THINKING)")
-	maxPriority := flags.String("max-priority", "P2", "include findings at this priority or higher: P0, P1, P2, or P3")
+	maxPriority := flags.String("max-priority", "P1", "include findings at this priority or higher: P0, P1, P2, or P3")
 	plain := flags.Bool("plain", false, "use plain output instead of chef voice")
 	jsonOutput := flags.String("json-output", "", "write the filtered verdict JSON to this path")
 	fakeVerdict := flags.String("fake-verdict", "", "read canned verdict JSON from this file (fake engine only)")
