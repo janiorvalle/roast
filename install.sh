@@ -17,7 +17,7 @@ command -v curl >/dev/null 2>&1 || fail "curl is required"
 case "$(uname -s)" in
   Darwin) os=darwin ;;
   Linux) os=linux ;;
-  *) fail "unsupported operating system; Windows users should download the release zip" ;;
+  *) fail "unsupported operating system; on Windows run install.ps1 in PowerShell: irm https://raw.githubusercontent.com/janiorvalle/roast/main/install.ps1 | iex" ;;
 esac
 case "$(uname -m)" in
   x86_64|amd64) arch=amd64 ;;

@@ -105,6 +105,10 @@ jobs:
         if: needs.changes.outputs.code == 'true'
       - run: go test ./...
         if: needs.changes.outputs.code == 'true'
+      - name: Installer smoke
+        if: needs.changes.outputs.code == 'true' && matrix.os == 'windows-latest'
+        shell: powershell
+        run: .\scripts\install-smoke.ps1
 
   install-smoke:
     name: Installer smoke

@@ -33,8 +33,16 @@ curl -fsSL https://raw.githubusercontent.com/janiorvalle/roast/main/install.sh |
 
 The installer downloads the release for your platform, verifies its SHA-256
 against the published checksums, and installs a single `roast` binary to
-`~/.local/bin` (override with `ROAST_INSTALL_DIR`). No sudo. Windows users:
-grab the zip from [releases](https://github.com/janiorvalle/roast/releases).
+`~/.local/bin` (override with `ROAST_INSTALL_DIR`). No sudo.
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/janiorvalle/roast/main/install.ps1 | iex
+```
+
+Same checks, and `roast.exe` lands in `%LOCALAPPDATA%\Programs\roast` on your
+user PATH (override with `ROAST_INSTALL_DIR`).
 
 With Go installed this also works:
 
