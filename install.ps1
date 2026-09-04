@@ -58,14 +58,35 @@ $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
   default { Fail "unsupported architecture: $env:PROCESSOR_ARCHITECTURE; roast ships for amd64 and arm64" }
 }
 
+# A token lifts the GitHub API's limit of sixty unauthenticated requests an
+# hour per address, which shared machines such as CI runners hit.
+$githubToken = if ($env:ROAST_GITHUB_TOKEN) {
+  $env:ROAST_GITHUB_TOKEN
+} elseif ($env:GH_TOKEN) {
+  $env:GH_TOKEN
+} else {
+  $env:GITHUB_TOKEN
+}
+$apiHeaders = @{
+  Accept = "application/vnd.github+json"
+  "User-Agent" = "roast-installer"
+}
+if ($githubToken) {
+  $apiHeaders.Authorization = "Bearer $githubToken"
+}
+
 if (-not $version) {
   try {
-    $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -Headers @{
-      Accept = "application/vnd.github+json"
-      "User-Agent" = "roast-installer"
-    } -ErrorAction Stop
+    $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -Headers $apiHeaders -ErrorAction Stop
   } catch {
-    Fail "no published release found for $repo; see https://github.com/$repo/releases"
+    $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+    if ($status -eq 403 -or $status -eq 429) {
+      Fail "GitHub answered HTTP $status to the latest-release lookup for $repo, its rate limit for requests without a token. Set GH_TOKEN or ROAST_GITHUB_TOKEN to a GitHub token, or set ROAST_INSTALL_VERSION to skip the lookup, then retry."
+    }
+    if ($status -eq 0) {
+      Fail "could not reach api.github.com for the latest release of $repo. Check the network, or set ROAST_INSTALL_VERSION to skip the lookup, then retry."
+    }
+    Fail "GitHub answered HTTP $status to the latest-release lookup for $repo; see https://github.com/$repo/releases"
   }
   $version = [string]$release.tag_name
 }
