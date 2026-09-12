@@ -11,7 +11,6 @@ Run `roast` as the independent ship gate after implementing a change.
 ## Contract
 
 - Review the current task's diff, not the whole codebase.
-- Prefer a review engine that did not write the change to preserve cross-model independence.
 - Run cheap gates first: format/lint, typecheck or compile, then fast tests.
 - Treat findings as claims. Verify every finding against the real code and the
   current diff before fixing it.

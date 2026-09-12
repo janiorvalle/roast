@@ -93,8 +93,7 @@ The first time roast runs it installs a skill into any Claude Code or Codex
 home it finds (`roast install-skill --force` reinstalls). The skill teaches
 the agent the loop: run the cheap gates, run roast, treat findings as claims,
 verify each one against the real code before fixing it, and repeat until the
-verdict is well done. It also tells agents to prefer a review engine that
-didn't write the change, so the judge isn't grading its own homework.
+verdict is well done.
 
 TruffleHog scans the full pre- and post-change content before any engine
 runs, and files like `.env` or key stores are excluded from what the reviewer
