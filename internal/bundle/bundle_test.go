@@ -134,14 +134,28 @@ func TestSanitizeDiffForPromptDoesNotTreatTextHunkAsBinaryPatch(t *testing.T) {
 	}
 }
 
-func TestPromptDiffContributionsReportsSanitizedSectionBytes(t *testing.T) {
-	diff := "diff --git a/small.go b/small.go\n+x\ndiff --git a/large.go b/large.go\n+much larger\n"
-	contributions := PromptDiffContributions(diff)
-	if len(contributions) != 2 || contributions[0].Path != "small.go" || contributions[1].Path != "large.go" {
-		t.Fatalf("contributions = %#v", contributions)
+func TestPromptDiffSectionsPartitionTheDiffByFile(t *testing.T) {
+	first := "diff --git a/small.go b/small.go\n+x\n"
+	second := "diff --git a/large.go b/large.go\n+much larger\n"
+	sections := PromptDiffSections(first + second)
+	if len(sections) != 2 || sections[0].Path != "small.go" || sections[1].Path != "large.go" {
+		t.Fatalf("sections = %#v", sections)
 	}
-	if contributions[0].Bytes != len("diff --git a/small.go b/small.go\n+x\n") || contributions[1].Bytes != len("diff --git a/large.go b/large.go\n+much larger\n") {
-		t.Fatalf("contribution bytes = %#v", contributions)
+	if sections[0].Text != first || sections[1].Text != second {
+		t.Fatalf("section text = %#v", sections)
+	}
+}
+
+func TestPromptDiffSectionsKeepPreambleWithTheFirstFile(t *testing.T) {
+	preamble := "Binary patch omitted: \"blob\", deleted binary, 12 bytes.\n"
+	first := "diff --git a/small.go b/small.go\n+x\n"
+	sections := PromptDiffSections(preamble + first)
+	if len(sections) != 1 || sections[0].Path != "small.go" || sections[0].Text != preamble+first {
+		t.Fatalf("sections = %#v", sections)
+	}
+	only := PromptDiffSections(preamble)
+	if len(only) != 1 || only[0].Path != "unidentified diff section" || only[0].Text != preamble {
+		t.Fatalf("sections without a header = %#v", only)
 	}
 }
 
