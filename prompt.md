@@ -1,10 +1,10 @@
 # roast — review prompt template
 
 This is the exact prompt sent to the review engine. `{{...}}` placeholders are
-filled by the CLI at run time. `{{INTENT}}` becomes the task intent section
-when the caller passes `--intent` or `--intent-file`, and nothing otherwise, so
-a review without an intent gets exactly this prompt. Reviewable like code —
-propose edits via PR.
+filled by the CLI at run time. The intent placeholder becomes a task intent
+section when the caller passes `--intent` or `--intent-file`, and nothing
+otherwise, so a review without an intent gets exactly this prompt. Reviewable
+like code — propose edits via PR.
 
 ---
 
