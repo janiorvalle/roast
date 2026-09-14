@@ -6,17 +6,22 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/janiorvalle/roast"
 	"github.com/janiorvalle/roast/internal/bundle"
+	"github.com/janiorvalle/roast/internal/engine"
 	"github.com/janiorvalle/roast/internal/prompt"
 	"github.com/janiorvalle/roast/internal/runner"
 	"github.com/janiorvalle/roast/internal/target"
@@ -786,5 +791,248 @@ func runMainGit(t *testing.T, repo string, args ...string) {
 	command.Dir = repo
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+}
+
+// writeLargeChange adds files whose diff sections together exceed the default
+// prompt limit several times over, so the review has to run in chunks.
+func writeLargeChange(t *testing.T, repo string, files, bytesPerFile int) []string {
+	t.Helper()
+	names := make([]string, 0, files)
+	for index := 1; index <= files; index++ {
+		name := fmt.Sprintf("generated-%02d.txt", index)
+		var content strings.Builder
+		for line := 1; content.Len() < bytesPerFile; line++ {
+			fmt.Fprintf(&content, "generated line %06d of %s\n", line, name)
+		}
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+func writeChunkVerdictFixture(t *testing.T, path string, chunkVerdicts []verdict.Verdict) {
+	t.Helper()
+	encoded := make([]json.RawMessage, 0, len(chunkVerdicts))
+	for _, chunkVerdict := range chunkVerdicts {
+		raw, err := verdict.Encode(chunkVerdict)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded = append(encoded, raw)
+	}
+	content, err := json.Marshal(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func chunkProvenances(t *testing.T, repo string, count int) []verdict.Provenance {
+	t.Helper()
+	base := testProvenance(t, repo)
+	provenances := make([]verdict.Provenance, 0, count)
+	for index := 1; index <= count; index++ {
+		provenances = append(provenances, provenanceForChunk(base, prompt.DiffChunk{Index: index, Count: count}))
+	}
+	return provenances
+}
+
+func TestRunReviewsAThreeMiBDiffInChunksAndReturnsOneVerdict(t *testing.T) {
+	repo := initMainRepository(t)
+	writeLargeChange(t, repo, 12, 300<<10)
+	const chunkCount = 4
+	provenances := chunkProvenances(t, repo, chunkCount)
+	chunkVerdicts := make([]verdict.Verdict, 0, chunkCount)
+	for _, provenance := range provenances {
+		chunkVerdicts = append(chunkVerdicts, verdict.Verdict{Overall: verdict.OverallWellDone, Findings: []verdict.Finding{}, Provenance: provenance})
+	}
+	responsePath := filepath.Join(t.TempDir(), "chunk-responses.json")
+	writeChunkVerdictFixture(t, responsePath, chunkVerdicts)
+	verdictPath := filepath.Join(t.TempDir(), "verdict.json")
+
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath, "--json-output", verdictPath}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "chunks: 4 [") || !strings.Contains(stderr.String(), "[ROAST-CHUNK] reviewing chunk 4/4: 3 files, ") || !strings.Contains(stderr.String(), "well done - send it.") {
+		t.Fatalf("stdout = %s, stderr = %s", stdout.String(), stderr.String())
+	}
+	encoded, err := os.ReadFile(verdictPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := verdict.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Overall != verdict.OverallWellDone || len(merged.Findings) != 0 || !strings.Contains(merged.Provenance.Context, "; chunks=4 [") || !strings.HasSuffix(merged.Provenance.Context, " diff bytes]") {
+		t.Fatalf("merged verdict = %#v", merged)
+	}
+}
+
+func TestRunMergesChunkFindingsIntoOneRawVerdict(t *testing.T) {
+	repo := initMainRepository(t)
+	writeLargeChange(t, repo, 12, 300<<10)
+	const chunkCount = 4
+	provenances := chunkProvenances(t, repo, chunkCount)
+	chunkVerdicts := []verdict.Verdict{
+		{Overall: verdict.OverallWellDone, Findings: []verdict.Finding{}, Provenance: provenances[0]},
+		{Overall: verdict.OverallRaw, Findings: []verdict.Finding{
+			{Priority: verdict.PriorityP2, File: "generated-05.txt", Line: 3, Title: "edge case", Rationale: "narrow", Suggestion: "guard it"},
+		}, Provenance: provenances[1]},
+		{Overall: verdict.OverallRaw, Findings: []verdict.Finding{
+			{Priority: verdict.PriorityP1, File: "generated-01.txt", Line: 1, Title: "logic error in another chunk's file", Rationale: "the wrong branch runs"},
+		}, Provenance: provenances[2]},
+		{Overall: verdict.OverallWellDone, Findings: []verdict.Finding{}, Provenance: provenances[3]},
+	}
+	responsePath := filepath.Join(t.TempDir(), "chunk-responses.json")
+	writeChunkVerdictFixture(t, responsePath, chunkVerdicts)
+
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 1 {
+		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "RAW. Fix 1 finding(s)") || !strings.Contains(stderr.String(), "P1 generated-01.txt:1: logic error in another chunk's file") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "edge case") {
+		t.Fatalf("a P2 finding survived the P1 filter: %s", stderr.String())
+	}
+}
+
+func TestRunRejectsAChunkFindingOnAMissingFile(t *testing.T) {
+	repo := initMainRepository(t)
+	writeLargeChange(t, repo, 12, 300<<10)
+	const chunkCount = 4
+	provenances := chunkProvenances(t, repo, chunkCount)
+	chunkVerdicts := []verdict.Verdict{
+		{Overall: verdict.OverallWellDone, Findings: []verdict.Finding{}, Provenance: provenances[0]},
+		{Overall: verdict.OverallRaw, Findings: []verdict.Finding{
+			{Priority: verdict.PriorityP1, File: "missing.go", Line: 1, Title: "missing file", Rationale: "it is not present"},
+		}, Provenance: provenances[1]},
+	}
+	responsePath := filepath.Join(t.TempDir(), "chunk-responses.json")
+	writeChunkVerdictFixture(t, responsePath, chunkVerdicts)
+
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 1 {
+		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
+	}
+	for _, expected := range []string{"ROAST-VERDICT-FILE", `"missing.go"`, "this was chunk 2/4", "earlier chunks are discarded"} {
+		if !strings.Contains(stderr.String(), expected) {
+			t.Fatalf("stderr = %q, missing %q", stderr.String(), expected)
+		}
+	}
+}
+
+func TestRunNamesTheOneFileTooLargeForAnyChunk(t *testing.T) {
+	repo := initMainRepository(t)
+	writeLargeChange(t, repo, 2, 100<<10)
+	writeLargeChange(t, repo, 1, prompt.DefaultMaximumPromptBytes+(64<<10))
+	missingVerdict := filepath.Join(t.TempDir(), "engine-must-not-read-this.json")
+	var stdout, stderr bytes.Buffer
+	exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", missingVerdict}, &stdout, &stderr)
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
+	}
+	for _, expected := range []string{"ROAST-PROMPT-SIZE", `"generated-01.txt"`, "1048576-byte limit", "own commit", "no review engine was called"} {
+		if !strings.Contains(stderr.String(), expected) {
+			t.Fatalf("stderr = %q, missing %q", stderr.String(), expected)
+		}
+	}
+	if strings.Contains(stderr.String(), "ROAST-ENGINE-FAKE") || strings.Contains(stderr.String(), "engine-must-not-read-this") {
+		t.Fatalf("fake engine was called: %s", stderr.String())
+	}
+}
+
+// promptCapturingRunner records what the review engine's CLI would have read
+// on stdin and answers with a canned verdict, while git keeps running for real.
+type promptCapturingRunner struct {
+	runner.ExecRunner
+	binary   string
+	response []byte
+	prompts  []string
+}
+
+func (commands *promptCapturingRunner) RunWithInput(ctx context.Context, dir, program, input string, args ...string) (runner.Result, error) {
+	if program == commands.binary {
+		commands.prompts = append(commands.prompts, input)
+		return runner.Result{Stdout: commands.response}, nil
+	}
+	return commands.ExecRunner.RunWithInput(ctx, dir, program, input, args...)
+}
+
+func TestRunSendsAChangeUnderTheLimitAsOneUnchangedPrompt(t *testing.T) {
+	repo := initMainRepository(t)
+	writeMainChange(t, repo)
+	binary := filepath.Join(t.TempDir(), "claude-stand-in")
+	standIn := "#!/bin/sh\nexit 0\n"
+	if runtime.GOOS == "windows" {
+		// exec.LookPath on Windows only accepts an executable extension.
+		binary += ".bat"
+		standIn = "@exit /b 0\r\n"
+	}
+	if err := os.WriteFile(binary, []byte(standIn), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ROAST_CLAUDE_BINARY", binary)
+	t.Setenv("ROAST_CLAUDE_MODEL", "stand-in-model")
+	t.Setenv("ROAST_MODEL", "")
+	t.Setenv("ROAST_CLAUDE_THINKING", "")
+	t.Setenv("ROAST_THINKING", "")
+	provenance := testProvenance(t, repo)
+	provenance.Engine = "claude/stand-in-model"
+	provenance.Context = contextWithIsolation(nil, verdict.PriorityP1, "", "", "claude")
+	response, err := verdict.Encode(verdict.Verdict{Overall: verdict.OverallWellDone, Findings: []verdict.Finding{}, Provenance: provenance})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := &promptCapturingRunner{binary: binary, response: response}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies([]string{"--dirty", "--repo", repo, "--engine", "claude"}, &stdout, &stderr, runDependencies{
+		commands: commands,
+		scanSecrets: func(context.Context, target.Target, []byte, []byte, runner.Runner) error {
+			return nil
+		},
+	})
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
+	}
+	if len(commands.prompts) != 1 {
+		t.Fatalf("engine calls = %d, want exactly one", len(commands.prompts))
+	}
+
+	reviewTarget, err := target.Resolve(context.Background(), target.Options{Dirty: true, RepoDir: repo, Runner: runner.ExecRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewBundle, err := bundle.Build(context.Background(), reviewTarget, runner.ExecRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	promptDiff, _ := bundle.SanitizeDiffForPrompt(reviewBundle.Diff, reviewBundle.Snapshot)
+	assembled, err := prompt.Assemble(prompt.Data{
+		Template:           roast.DefaultPromptTemplate(),
+		VerdictSchema:      verdict.Schema(),
+		IncludedPriorities: verdict.IncludedPriorities(verdict.PriorityP1),
+		Target:             reviewTarget.Range,
+		Branch:             provenance.Branch,
+		Diff:               promptDiff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := engine.PromptWithProvenance(assembled, provenance)
+	if commands.prompts[0] != expected {
+		t.Fatalf("engine prompt differs from the whole-diff prompt:\n--- got ---\n%s\n--- want ---\n%s", commands.prompts[0], expected)
+	}
+	if !strings.Contains(stdout.String(), "chunks: 1 [") || strings.Contains(stderr.String(), "ROAST-CHUNK") {
+		t.Fatalf("stdout = %s, stderr = %s", stdout.String(), stderr.String())
 	}
 }

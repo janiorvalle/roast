@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/janiorvalle/roast/internal/prompt"
 	"github.com/janiorvalle/roast/internal/runner"
 	"github.com/janiorvalle/roast/internal/secrets"
 	"github.com/janiorvalle/roast/internal/target"
@@ -69,13 +70,6 @@ func Build(ctx context.Context, reviewTarget target.Target, commands runner.Runn
 	return Bundle{Target: reviewTarget, Diff: diff, SecretScanDiff: secretScanDiff, SecretScanSnapshot: secretScanSnapshot, ExcludedSensitivePaths: excludedSensitivePaths, Snapshot: snapshot}, nil
 }
 
-// DiffContribution describes one file section's contribution to the prompt
-// copy of a diff.
-type DiffContribution struct {
-	Path  string
-	Bytes int
-}
-
 // SanitizeDiffForPrompt removes binary patch payloads and replaces invalid
 // UTF-8 sequences in review diff text with U+FFFD. The raw diff remains in
 // Bundle.Diff for bundle fingerprints and local secret scanning; this function
@@ -126,27 +120,36 @@ func SanitizeDiffForPrompt(diff, snapshot []byte) (string, []string) {
 	return sanitized.String(), paths
 }
 
-// PromptDiffContributions returns file sections ordered by their appearance in
-// the prompt diff. Callers may sort the result when presenting size details.
-func PromptDiffContributions(diff string) []DiffContribution {
-	sections := splitDiffSections([]byte(diff))
-	contributions := make([]DiffContribution, 0, len(sections))
-	for _, section := range sections {
+// PromptDiffSections splits a prompt diff into one section per file, in
+// prompt order. Concatenating the sections gives the diff back byte for byte:
+// text before the first file header travels with the first file.
+func PromptDiffSections(diff string) []prompt.DiffSection {
+	sections := make([]prompt.DiffSection, 0)
+	preamble := ""
+	for _, section := range splitDiffSections([]byte(diff)) {
 		if !bytes.HasPrefix(section, []byte("diff --git ")) {
+			preamble += string(section)
 			continue
 		}
-		lineEnd := bytes.IndexByte(section, '\n')
-		if lineEnd < 0 {
-			lineEnd = len(section)
-		}
-		paths, ok := bundleDiffHeaderPaths(strings.TrimPrefix(string(section[:lineEnd]), "diff --git "))
-		path := "unidentified diff section"
-		if ok && len(paths) > 0 {
-			path = paths[len(paths)-1]
-		}
-		contributions = append(contributions, DiffContribution{Path: path, Bytes: len(section)})
+		sections = append(sections, prompt.DiffSection{Path: diffSectionPath(section), Text: preamble + string(section)})
+		preamble = ""
 	}
-	return contributions
+	if preamble != "" {
+		sections = append(sections, prompt.DiffSection{Path: "unidentified diff section", Text: preamble})
+	}
+	return sections
+}
+
+func diffSectionPath(section []byte) string {
+	lineEnd := bytes.IndexByte(section, '\n')
+	if lineEnd < 0 {
+		lineEnd = len(section)
+	}
+	paths, ok := bundleDiffHeaderPaths(strings.TrimPrefix(string(section[:lineEnd]), "diff --git "))
+	if !ok || len(paths) == 0 {
+		return "unidentified diff section"
+	}
+	return paths[len(paths)-1]
 }
 
 func stubBinaryPatches(diff []byte, snapshotSizes map[string]int) []byte {

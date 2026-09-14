@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -295,7 +296,7 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 		Engine:  engineLabel,
 		Context: contextWithIsolation(contextDocuments, maximum, *contextGlob, *extraPrompt, *engineName) + intentProvenance(reviewIntent),
 	}
-	reviewPrompt, err := prompt.Assemble(prompt.Data{
+	promptData := prompt.Data{
 		Template:           template,
 		ContextDocuments:   contextDocuments,
 		VerdictSchema:      verdict.Schema(),
@@ -304,8 +305,8 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 		Branch:             branch,
 		ExtraPrompt:        *extraPrompt,
 		Intent:             reviewIntent,
-		Diff:               promptDiff,
-	})
+	}
+	promptFrame, err := prompt.Assemble(promptData)
 	if err != nil {
 		fmt.Fprintf(stderr, "roast: %v\n", err)
 		return 1
@@ -315,18 +316,14 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 		fmt.Fprintf(stderr, "roast: %v\n", err)
 		return 1
 	}
-	bundleContributions := bundle.PromptDiffContributions(promptDiff)
-	promptContributions := make([]prompt.DiffContribution, 0, len(bundleContributions))
-	for _, contribution := range bundleContributions {
-		promptContributions = append(promptContributions, prompt.DiffContribution{Path: contribution.Path, Bytes: contribution.Bytes})
-	}
-	promptToMeasure := reviewPrompt
-	sizeBudget := prompt.SizeBudget{MaximumBytes: maximumPromptBytes}
-	if *engineName != "fake" {
-		promptToMeasure = engine.PromptWithProvenance(reviewPrompt, provenance)
-		sizeBudget.ReservedBytes = engine.RetryPromptReserveBytes()
-	}
-	if err := prompt.ValidateSize(promptToMeasure, sizeBudget, promptContributions); err != nil {
+	sections := bundle.PromptDiffSections(promptDiff)
+	widestLabel := prompt.DiffChunk{Index: len(sections), Count: len(sections)}
+	chunks, err := prompt.SplitDiff(sections, prompt.ChunkBudget{
+		MaximumBytes:    maximumPromptBytes,
+		WholeFrameBytes: len(promptFrame) + engineFrameBytes(*engineName, provenance),
+		ChunkFrameBytes: len(promptFrame) + engineFrameBytes(*engineName, provenanceForChunk(provenance, widestLabel)),
+	})
+	if err != nil {
 		fmt.Fprintf(stderr, "roast: %v\n", err)
 		return 1
 	}
@@ -352,56 +349,70 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 			}
 		}()
 	}
-
-	var engineResponse []byte
 	if *engineName == "fake" {
-		cannedResponse, readErr := readFakeVerdict(fakeVerdictPath)
+		cannedResponses, readErr := readFakeVerdicts(fakeVerdictPath)
 		if readErr != nil {
 			fmt.Fprintf(stderr, "roast: %v\n", readErr)
 			return 1
 		}
-		engineResponse, err = engine.NewFake(cannedResponse).Review(ctx, engine.Request{
-			Prompt:     reviewPrompt,
-			Provenance: provenance,
-		})
-	} else {
-		engineResponse, err = selectedEngine.Review(ctx, engine.Request{
+		selectedEngine = engine.NewFakeSequence(cannedResponses)
+	}
+
+	chunkVerdicts := make([]verdict.Verdict, 0, len(chunks))
+	for _, chunk := range chunks {
+		chunkProvenance := provenanceForChunk(provenance, chunk)
+		promptData.Diff = chunk.PromptDiff()
+		reviewPrompt, err := prompt.Assemble(promptData)
+		if err != nil {
+			fmt.Fprintf(stderr, "roast: %v\n", err)
+			return 1
+		}
+		if chunk.Count > 1 {
+			fmt.Fprintf(stderr, "roast: [ROAST-CHUNK] reviewing chunk %d/%d: %d files, %d diff bytes\n", chunk.Index, chunk.Count, len(chunk.Sections), chunk.DiffBytes())
+		}
+		engineResponse, err := selectedEngine.Review(ctx, engine.Request{
 			Prompt:             reviewPrompt,
-			Provenance:         provenance,
+			Provenance:         chunkProvenance,
 			SnapshotDir:        snapshotDir,
 			AllowedFiles:       snapshotFiles,
 			SnapshotLineCounts: lineCounts,
 			DiffLineRanges:     diffRanges,
 			MaximumPromptBytes: maximumPromptBytes,
-			DiffContributions:  promptContributions,
+			DiffContributions:  chunk.Contributions(),
 		})
+		if err != nil {
+			fmt.Fprintf(stderr, "roast: %v\n", chunkError(err, chunk))
+			return 1
+		}
+		engineVerdict, err := verdict.Decode(engineResponse)
+		if err != nil {
+			fmt.Fprintf(stderr, "roast: %v\n", chunkError(err, chunk))
+			return 1
+		}
+		if engineVerdict.Provenance != chunkProvenance {
+			fmt.Fprintf(stderr, "roast: [ROAST-VERDICT-PROVENANCE] %s verdict provenance does not describe this bundle; return these exact values in the verdict and retry:\n  target: %s\n  branch: %s\n  tree: %s\n  engine: %s\n  context: %s\n", displayProvenanceValue(engineLabel), displayProvenanceValue(chunkProvenance.Target), displayProvenanceValue(chunkProvenance.Branch), displayProvenanceValue(chunkProvenance.Tree), displayProvenanceValue(chunkProvenance.Engine), displayProvenanceValue(chunkProvenance.Context))
+			return 1
+		}
+		if err := verdict.ValidateWithLocations(engineVerdict, snapshotFiles, lineCounts, diffRanges); err != nil {
+			fmt.Fprintf(stderr, "roast: %v\n", chunkError(err, chunk))
+			return 1
+		}
+		chunkVerdicts = append(chunkVerdicts, engineVerdict)
 	}
 	if cleanupSnapshot != nil {
 		cleanupSnapshot()
 		cleanupSnapshot = nil
 	}
-	if err != nil {
-		fmt.Fprintf(stderr, "roast: %v\n", err)
-		return 1
-	}
 	if err := ensureBundleUnchanged(ctx, reviewTarget, reviewBundle, commands); err != nil {
 		fmt.Fprintf(stderr, "roast: %v\n", err)
 		return 1
 	}
-	engineVerdict, err := verdict.Decode(engineResponse)
-	if err != nil {
+	mergedVerdict := verdict.Merge(chunkVerdicts, provenanceForChange(provenance, chunks))
+	if err := verdict.ValidateWithLocations(mergedVerdict, snapshotFiles, lineCounts, diffRanges); err != nil {
 		fmt.Fprintf(stderr, "roast: %v\n", err)
 		return 1
 	}
-	if engineVerdict.Provenance != provenance {
-		fmt.Fprintf(stderr, "roast: [ROAST-VERDICT-PROVENANCE] %s verdict provenance does not describe this bundle; return these exact values in the verdict and retry:\n  target: %s\n  branch: %s\n  tree: %s\n  engine: %s\n  context: %s\n", displayProvenanceValue(engineLabel), displayProvenanceValue(provenance.Target), displayProvenanceValue(provenance.Branch), displayProvenanceValue(provenance.Tree), displayProvenanceValue(provenance.Engine), displayProvenanceValue(provenance.Context))
-		return 1
-	}
-	if err := verdict.ValidateWithLocations(engineVerdict, snapshotFiles, lineCounts, diffRanges); err != nil {
-		fmt.Fprintf(stderr, "roast: %v\n", err)
-		return 1
-	}
-	filteredVerdict, err := verdict.Filter(engineVerdict, maximum)
+	filteredVerdict, err := verdict.Filter(mergedVerdict, maximum)
 	if err != nil {
 		fmt.Fprintf(stderr, "roast: %v\n", err)
 		return 1
@@ -421,6 +432,7 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 	fmt.Fprintf(stdout, "target: %s\n", reviewTarget.Label())
 	fmt.Fprintf(stdout, "diff bytes: %d\n", len(reviewBundle.Diff))
 	fmt.Fprintf(stdout, "snapshot bytes: %d\n", len(reviewBundle.Snapshot))
+	fmt.Fprintf(stdout, "chunks: %s\n", prompt.ChunkSummary(chunks))
 	if *bundleDir != "" {
 		fmt.Fprintf(stdout, "bundle: %s\n", *bundleDir)
 	}
@@ -544,7 +556,9 @@ func resolveEngineSetting(name, flagValue, setting string) string {
 	return engine.DefaultThinking(name)
 }
 
-func readFakeVerdict(path string) ([]byte, error) {
+// readFakeVerdicts reads the canned verdicts for the fake engine: one JSON
+// object for a single call, or a JSON array with one object per chunk.
+func readFakeVerdicts(path string) ([][]byte, error) {
 	if path == "" {
 		return nil, nil
 	}
@@ -552,10 +566,51 @@ func readFakeVerdict(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("[ROAST-ENGINE-FAKE] cannot read canned verdict %q: %w; pass a readable JSON file", path, err)
 	}
-	if content == nil {
-		content = []byte{}
+	var sequence []json.RawMessage
+	if err := json.Unmarshal(content, &sequence); err != nil {
+		return [][]byte{content}, nil
 	}
-	return content, nil
+	responses := make([][]byte, 0, len(sequence))
+	for _, response := range sequence {
+		responses = append(responses, []byte(response))
+	}
+	return responses, nil
+}
+
+// engineFrameBytes is what a real engine adds around the assembled prompt:
+// the provenance contract and the space held back for one validator retry.
+// The fake engine sends the prompt as assembled.
+func engineFrameBytes(engineName string, provenance verdict.Provenance) int {
+	if engineName == "fake" {
+		return 0
+	}
+	return len(engine.PromptWithProvenance("", provenance)) + engine.RetryPromptReserveBytes()
+}
+
+// provenanceForChunk names the chunk in the provenance an engine call must
+// echo, so a chunk verdict says which part of the change it reviewed. A
+// change reviewed in one call keeps the provenance unchanged.
+func provenanceForChunk(base verdict.Provenance, chunk prompt.DiffChunk) verdict.Provenance {
+	if chunk.Count > 1 {
+		base.Context += "; " + chunk.Label()
+	}
+	return base
+}
+
+// provenanceForChange records how a change was chunked in the merged verdict,
+// so a verdict never hides that it came from several engine calls.
+func provenanceForChange(base verdict.Provenance, chunks []prompt.DiffChunk) verdict.Provenance {
+	if len(chunks) > 1 {
+		base.Context += "; chunks=" + prompt.ChunkSummary(chunks)
+	}
+	return base
+}
+
+func chunkError(err error, chunk prompt.DiffChunk) error {
+	if chunk.Count == 1 {
+		return err
+	}
+	return fmt.Errorf("%w; this was chunk %d/%d, and the verdicts of the earlier chunks are discarded", err, chunk.Index, chunk.Count)
 }
 
 func bundleFingerprint(reviewBundle bundle.Bundle) string {
