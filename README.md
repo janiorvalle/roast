@@ -74,9 +74,12 @@ P0 auth.go:4: Every user is granted administrator status
 
 Useful flags: `--engine codex|claude`, `--model` and `--thinking` for
 per-engine overrides, `--max-priority P0|P1|P2|P3` (default P1),
-`--json-output <path>` for the full verdict as JSON (the path must be outside
-the repository so review artifacts never become reviewed source), and
-`--plain` for CI logs without the chef voice.
+`--intent <text>` or `--intent-file <path>` to judge the change against what
+the task asked for (a problem outside the intent is an observation, never a
+finding, and the verdict's provenance names the intent it was judged against),
+`--json-output <path>` for the full verdict as JSON, and `--plain` for CI logs
+without the chef voice. The intent file and the verdict path must both be
+outside the repository so review artifacts never become reviewed source.
 
 Two things worth knowing up front. Reviews spend tokens through your own CLI
 subscription or API key — that's the deal with an AI reviewer, and roast
@@ -91,9 +94,10 @@ Reviewing one task's diff at a time is the intended use anyway.
 
 The first time roast runs it installs a skill into any Claude Code or Codex
 home it finds (`roast install-skill --force` reinstalls). The skill teaches
-the agent the loop: run the cheap gates, run roast, treat findings as claims,
-verify each one against the real code before fixing it, and repeat until the
-verdict is well done.
+the agent the loop: freeze the task's intent to a file, run the cheap gates,
+run roast with that intent every round, treat findings as claims, verify each
+one against the real code before fixing it, and repeat until the verdict is
+well done.
 
 TruffleHog scans the full pre- and post-change content before any engine
 runs, and files like `.env` or key stores are excluded from what the reviewer
