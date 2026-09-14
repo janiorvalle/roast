@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -482,6 +486,136 @@ func TestRunReportsCopyableProvenanceMismatch(t *testing.T) {
 	if strings.Contains(stderr.String(), `\"`) {
 		t.Fatalf("provenance hint still uses Go-escaped quotes: %s", stderr.String())
 	}
+}
+
+func TestRunInlineIntentIsNamedInProvenance(t *testing.T) {
+	repo := initMainRepository(t)
+	writeMainChange(t, repo)
+	provenance := testProvenance(t, repo)
+	provenance.Context += `; intent="Add Greet(name) to package greeting"`
+	responsePath := filepath.Join(t.TempDir(), "response.json")
+	writeVerdictFixture(t, responsePath, verdict.Verdict{Overall: verdict.OverallWellDone, Findings: []verdict.Finding{}, Provenance: provenance})
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--plain", "--intent", "Add Greet(name) to package greeting", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--plain", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 1 || !strings.Contains(stderr.String(), "ROAST-VERDICT-PROVENANCE") {
+		t.Fatalf("a verdict judged against an intent was accepted for a review without one: exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+}
+
+func TestRunIntentFileFramesPromptAndProvenance(t *testing.T) {
+	repo := initMainRepository(t)
+	writeMainChange(t, repo)
+	intent := "Request: add Greet(name) to package greeting.\nIntended behavior: returns Hello, <name>; an empty name is an error.\nOwner boundary: package greeting only; cmd/greet belongs to task #2.\nFiles: greeting/greeting.go\n"
+	intentPath := filepath.Join(t.TempDir(), "intent.md")
+	if err := os.WriteFile(intentPath, []byte(intent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(strings.TrimSpace(intent)))
+	provenance := testProvenance(t, repo)
+	provenance.Context += "; intent=sha256:" + hex.EncodeToString(digest[:]) + `; intent-first-line="Request: add Greet(name) to package greeting."`
+	responsePath := filepath.Join(t.TempDir(), "response.json")
+	writeVerdictFixture(t, responsePath, verdict.Verdict{Overall: verdict.OverallWellDone, Findings: []verdict.Finding{}, Provenance: provenance})
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--plain", "--intent-file", intentPath, "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
+	}
+
+	t.Setenv("ROAST_MAX_PROMPT_BYTES", "1")
+	stderr.Reset()
+	runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath}, &stdout, &stderr)
+	unframedBytes := assembledPromptBytes(t, stderr.String())
+	stderr.Reset()
+	runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--intent-file", intentPath, "--fake-verdict", responsePath}, &stdout, &stderr)
+	framedBytes := assembledPromptBytes(t, stderr.String())
+	if framedBytes < unframedBytes+len(strings.TrimSpace(intent)) {
+		t.Fatalf("intent did not reach the prompt: %d bytes without, %d bytes with", unframedBytes, framedBytes)
+	}
+}
+
+func TestRunRejectsIntentFileInsideRepository(t *testing.T) {
+	repo := initMainRepository(t)
+	writeMainChange(t, repo)
+	canonicalRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intentPath := filepath.Join(canonicalRepo, "intent.md")
+	if err := os.WriteFile(intentPath, []byte("Request: anything\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", canonicalRepo, "--engine", "fake", "--intent-file", intentPath, "--fake-verdict", cleanResponseFixture(t, repo)}, &stdout, &stderr); exitCode != 1 {
+		t.Fatalf("exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "ROAST-INTENT-FILE") || !strings.Contains(stderr.String(), "choose a path outside the repository") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestRunRejectsEmptyIntent(t *testing.T) {
+	repo := initMainRepository(t)
+	writeMainChange(t, repo)
+	responsePath := cleanResponseFixture(t, repo)
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--intent", "  ", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 2 || !strings.Contains(stderr.String(), "ROAST-INTENT-EMPTY") {
+		t.Fatalf("blank inline intent: exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+	emptyPath := filepath.Join(t.TempDir(), "intent.md")
+	if err := os.WriteFile(emptyPath, []byte("\n\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--intent-file", emptyPath, "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 1 || !strings.Contains(stderr.String(), "ROAST-INTENT-EMPTY") {
+		t.Fatalf("empty intent file: exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+	missingPath := filepath.Join(t.TempDir(), "missing.md")
+	stderr.Reset()
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--intent-file", missingPath, "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 1 || !strings.Contains(stderr.String(), "ROAST-INTENT-FILE") || !strings.Contains(stderr.String(), "cannot read intent file") {
+		t.Fatalf("missing intent file: exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+}
+
+func TestRunRejectsTwoIntentSources(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--engine", "fake", "--intent", "one", "--intent-file", "two.md"}, &stdout, &stderr); exitCode != 2 || !strings.Contains(stderr.String(), "ROAST-INTENT-SOURCE") {
+		t.Fatalf("exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+}
+
+func TestIntentProvenanceCarriesShortTextAndDigestsLongText(t *testing.T) {
+	if got := intentProvenance(""); got != "" {
+		t.Fatalf("no intent produced provenance %q", got)
+	}
+	if got := intentProvenance("Add Greet(name)"); got != `; intent="Add Greet(name)"` {
+		t.Fatalf("short intent provenance = %q", got)
+	}
+	long := strings.Repeat("x", inlineIntentProvenanceBytes+1)
+	digest := sha256.Sum256([]byte(long))
+	if got := intentProvenance(long); got != "; intent=sha256:"+hex.EncodeToString(digest[:])+"; intent-first-line="+strconv.Quote(long) {
+		t.Fatalf("long intent provenance = %q", got)
+	}
+	multiline := "Request: first line \nsecond line"
+	digest = sha256.Sum256([]byte(multiline))
+	if got := intentProvenance(multiline); got != "; intent=sha256:"+hex.EncodeToString(digest[:])+`; intent-first-line="Request: first line"` {
+		t.Fatalf("multiline intent provenance = %q", got)
+	}
+}
+
+func assembledPromptBytes(t *testing.T, stderr string) int {
+	t.Helper()
+	match := regexp.MustCompile(`assembled review prompt is (\d+) bytes`).FindStringSubmatch(stderr)
+	if match == nil {
+		t.Fatalf("no prompt size in stderr: %s", stderr)
+	}
+	size, err := strconv.Atoi(match[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return size
 }
 
 func TestEnsureBundleUnchangedRejectsWorktreeDrift(t *testing.T) {

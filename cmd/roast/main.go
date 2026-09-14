@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/janiorvalle/roast"
 	"github.com/janiorvalle/roast/internal/bundle"
@@ -104,6 +105,8 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 	fakeVerdict := flags.String("fake-verdict", "", "read canned verdict JSON from this file (fake engine only)")
 	contextGlob := flags.String("context-glob", "", "include snapshot files matching this context-document glob")
 	extraPrompt := flags.String("extra-prompt", "", "append extra review guidance to the prompt")
+	intentText := flags.String("intent", "", "the task's intent; the review is judged against this frame")
+	intentFile := flags.String("intent-file", "", "read the task's intent from this file (outside the repository)")
 	showVersion := flags.Bool("version", false, "print the version")
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -122,6 +125,14 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 	}
 	if *engineName != "fake" && *engineName != engine.EngineCodex && *engineName != engine.EngineClaude {
 		fmt.Fprintf(stderr, "roast: [ROAST-ENGINE-NAME] engine %q is unsupported; choose codex, claude, or fake\n", *engineName)
+		return 2
+	}
+	if *intentText != "" && *intentFile != "" {
+		fmt.Fprintln(stderr, "roast: [ROAST-INTENT-SOURCE] pass the task's intent once, as --intent <text> or --intent-file <path>, not both")
+		return 2
+	}
+	if flagGiven(flags, "intent") && strings.TrimSpace(*intentText) == "" {
+		fmt.Fprintln(stderr, "roast: [ROAST-INTENT-EMPTY] --intent is empty; state the task's intent (the request in one sentence, the intended behavior, the owner boundary, the files touched) or omit the flag")
 		return 2
 	}
 	selectedModel := resolveEngineSetting(*engineName, *model, "MODEL")
@@ -234,6 +245,11 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 		}
 		jsonOutputPath = checkedPath
 	}
+	reviewIntent, err := resolveIntent(*intentText, *intentFile, reviewTarget.RepoDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "roast: %v\n", err)
+		return 1
+	}
 
 	template := roast.DefaultPromptTemplate()
 	contextSelection, err := prompt.ContextDocuments(reviewBundle.Snapshot, *contextGlob)
@@ -277,7 +293,7 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 		Branch:  branch,
 		Tree:    bundleFingerprint(reviewBundle),
 		Engine:  engineLabel,
-		Context: contextWithIsolation(contextDocuments, maximum, *contextGlob, *extraPrompt, *engineName),
+		Context: contextWithIsolation(contextDocuments, maximum, *contextGlob, *extraPrompt, *engineName) + intentProvenance(reviewIntent),
 	}
 	reviewPrompt, err := prompt.Assemble(prompt.Data{
 		Template:           template,
@@ -287,6 +303,7 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 		Target:             reviewTarget.Range,
 		Branch:             branch,
 		ExtraPrompt:        *extraPrompt,
+		Intent:             reviewIntent,
 		Diff:               promptDiff,
 	})
 	if err != nil {
@@ -576,6 +593,57 @@ func contextWithIsolation(documents []prompt.Document, maximum verdict.Priority,
 		isolation = "fake"
 	}
 	return contextDescription(documents, maximum, contextGlob, extraPrompt) + "; isolation=" + isolation
+}
+
+func flagGiven(flags *flag.FlagSet, name string) bool {
+	given := false
+	flags.Visit(func(visited *flag.Flag) {
+		if visited.Name == name {
+			given = true
+		}
+	})
+	return given
+}
+
+// resolveIntent returns the task's intent from the inline flag or from a file
+// outside the repository. An empty result means the caller gave no intent.
+func resolveIntent(inline, filePath, repoDir string) (string, error) {
+	if filePath == "" {
+		return strings.TrimSpace(inline), nil
+	}
+	checkedPath, err := checkedRepositoryArtifact(filePath, repoDir, "intent file")
+	if err != nil {
+		return "", err
+	}
+	content, err := os.ReadFile(checkedPath)
+	if err != nil {
+		return "", fmt.Errorf("[ROAST-INTENT-FILE] cannot read intent file %q: %w; write the task's intent to a readable file outside the repository and retry", filePath, err)
+	}
+	if !utf8.Valid(content) {
+		return "", fmt.Errorf("[ROAST-INTENT-FILE] intent file %q is not valid UTF-8; write the task's intent as UTF-8 text and retry", filePath)
+	}
+	intent := strings.TrimSpace(string(content))
+	if intent == "" {
+		return "", fmt.Errorf("[ROAST-INTENT-EMPTY] intent file %q is empty; write the task's intent to it (the request in one sentence, the intended behavior, the owner boundary, the files touched) and retry", filePath)
+	}
+	return intent, nil
+}
+
+const inlineIntentProvenanceBytes = 120
+
+// intentProvenance names the intent a verdict was judged against. A short
+// one-line intent travels verbatim; a longer one travels as its SHA-256 digest
+// plus its first line, so a verdict never hides what framed it.
+func intentProvenance(intent string) string {
+	if intent == "" {
+		return ""
+	}
+	firstLine, _, multiline := strings.Cut(intent, "\n")
+	if !multiline && len(intent) <= inlineIntentProvenanceBytes {
+		return fmt.Sprintf("; intent=%q", intent)
+	}
+	digest := sha256.Sum256([]byte(intent))
+	return fmt.Sprintf("; intent=sha256:%s; intent-first-line=%q", hex.EncodeToString(digest[:]), strings.TrimSpace(firstLine))
 }
 
 func displayProvenanceValue(value string) string {

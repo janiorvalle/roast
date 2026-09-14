@@ -23,11 +23,16 @@ Run `roast` as the independent ship gate after implementing a change.
 
 Roast is a ship gate, not permission to rewrite the task.
 
-**Freeze the fence before the first review.** Before round 1, write down the
-task's scope in a few lines: the original request in one sentence, the intended
-behavior, the owner boundary, and the files the change touches. Every finding
-is judged against this baseline. Write it once — never re-derive scope
-per finding.
+**Freeze the fence before the first review.** Before round 1, write the
+task's scope to a file outside the repository, such as
+`$TMPDIR/roast-intent-<task>.md`, in a few lines: the original request in one
+sentence, the intended behavior, the owner boundary, and the files the change
+touches. Write it once, never re-derive scope per finding, and pass the same
+file to every round: `roast --intent-file <path>`. Roast judges the change
+against it, reports a problem outside it as an observation instead of a
+finding, and names the intent in the verdict's provenance. The file stays
+outside the repository, the same rule as `--json-output`, so the fence never
+becomes part of the reviewed change.
 
 **Classify every verified finding against the fence:**
 
@@ -61,11 +66,11 @@ those is never critical enough to grow the task.
 
 ## Loop until clean
 
-1. Freeze the scope fence, run the fast gates, then run `roast` on the
-   current change.
+1. Freeze the scope fence to its file, run the fast gates, then run
+   `roast --intent-file <path>` on the current change.
 2. Read each finding and verify its failure path in the repository.
 3. Classify each verified finding against the fence; fix in-scope blockers
    only, keeping the patch within the scope governor.
-4. Repeat from step 1 (skipping the freeze) until `roast` reports `well done`
-   with no unrecorded follow-ups.
+4. Repeat from step 1 (skipping the freeze, passing the same intent file)
+   until `roast` reports `well done` with no unrecorded follow-ups.
 5. Run the full check suite once and attach its real output as evidence.
