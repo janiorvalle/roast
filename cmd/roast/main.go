@@ -644,7 +644,6 @@ type priorVerdicts struct {
 	digests  []string
 }
 
-// readPriorVerdicts reads each annotated verdict from outside the repository.
 func readPriorVerdicts(paths []string, repoDir string) (priorVerdicts, error) {
 	prior := priorVerdicts{}
 	for _, pathValue := range paths {
