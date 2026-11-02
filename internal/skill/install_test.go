@@ -231,3 +231,17 @@ func TestBundledSkillStaysUnderOneHundredLines(t *testing.T) {
 		t.Fatalf("bundled skill has %d lines", lines)
 	}
 }
+
+func TestBundledSkillNamesNoRoundCapAndNoDiffGrowthStop(t *testing.T) {
+	text := strings.ToLower(string(roast.SkillInstructions()))
+	for _, forbidden := range []string{"two fix rounds", "tripwire", "2x", "stop and say so", "round cap"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("bundled skill still says %q", forbidden)
+		}
+	}
+	for _, required := range []string{"--prior-verdict", "land-pr", "--intent-file"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("bundled skill does not mention %q", required)
+		}
+	}
+}

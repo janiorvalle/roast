@@ -1036,3 +1036,142 @@ func TestRunSendsAChangeUnderTheLimitAsOneUnchangedPrompt(t *testing.T) {
 		t.Fatalf("stdout = %s, stderr = %s", stdout.String(), stderr.String())
 	}
 }
+
+func TestRunPriorVerdictHonorsAResolvedFindingAndNamesItInProvenance(t *testing.T) {
+	repo := initMainRepository(t)
+	writeMainChange(t, repo)
+	provenance := testProvenance(t, repo)
+	responsePath := filepath.Join(t.TempDir(), "response.json")
+	writeVerdictFixture(t, responsePath, verdict.Verdict{
+		Overall:    verdict.OverallRaw,
+		Findings:   []verdict.Finding{{Priority: verdict.PriorityP1, File: "changed.txt", Line: 1, Title: "Real defect", Rationale: "the input reaches a wrong result"}},
+		Provenance: provenance,
+	})
+	roundOnePath := filepath.Join(t.TempDir(), "round-1.json")
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath, "--json-output", roundOnePath}, &stdout, &stderr); exitCode != 1 {
+		t.Fatalf("round one exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+	roundOne, err := verdict.DecodePrior(mustRead(t, roundOnePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundOne.Findings[0].Resolution = verdict.Resolution{Kind: verdict.ResolutionWrong, Reason: "the input never reaches that branch"}
+	roundOne.Overall = verdict.OverallWellDone
+	annotatedPath := filepath.Join(t.TempDir(), "round-1-annotated.json")
+	writeVerdictFixture(t, annotatedPath, roundOne)
+
+	roundTwoPath := filepath.Join(t.TempDir(), "round-2.json")
+	stdout.Reset()
+	stderr.Reset()
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath, "--prior-verdict", annotatedPath, "--json-output", roundTwoPath}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("round two exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "well done - send it.") || !strings.Contains(stderr.String(), "Resolved in a prior verdict, not counted (1):\nP1 changed.txt:1: Real defect\n  resolved: wrong: the input never reaches that branch") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+	roundTwo, err := verdict.DecodePrior(mustRead(t, roundTwoPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roundTwo.Overall != verdict.OverallWellDone || len(roundTwo.Findings) != 1 || roundTwo.Findings[0].Resolution.Kind != verdict.ResolutionWrong {
+		t.Fatalf("round two verdict = %#v", roundTwo)
+	}
+	digest := sha256.Sum256(mustRead(t, annotatedPath))
+	if !strings.Contains(roundTwo.Provenance.Context, "; prior-verdict=sha256:"+hex.EncodeToString(digest[:])) {
+		t.Fatalf("provenance context = %q", roundTwo.Provenance.Context)
+	}
+}
+
+func TestRunPriorVerdictAcceptsSeveralRounds(t *testing.T) {
+	repo := initMainRepository(t)
+	writeMainChange(t, repo)
+	provenance := testProvenance(t, repo)
+	responsePath := filepath.Join(t.TempDir(), "response.json")
+	writeVerdictFixture(t, responsePath, verdict.Verdict{
+		Overall: verdict.OverallRaw,
+		Findings: []verdict.Finding{
+			{Priority: verdict.PriorityP1, File: "changed.txt", Line: 1, Title: "first", Rationale: "r"},
+			{Priority: verdict.PriorityP1, File: "changed.txt", Line: 1, Title: "second", Rationale: "r"},
+		},
+		Provenance: provenance,
+	})
+	first := filepath.Join(t.TempDir(), "first.json")
+	writeVerdictFixture(t, first, verdict.Verdict{Overall: verdict.OverallWellDone, Provenance: provenance, Findings: []verdict.Finding{
+		{Priority: verdict.PriorityP1, File: "changed.txt", Line: 1, Title: "first", Rationale: "r", Resolution: verdict.Resolution{Kind: verdict.ResolutionOutOfFence, Reason: "task 2"}},
+	}})
+	second := filepath.Join(t.TempDir(), "second.json")
+	writeVerdictFixture(t, second, verdict.Verdict{Overall: verdict.OverallWellDone, Provenance: provenance, Findings: []verdict.Finding{
+		{Priority: verdict.PriorityP1, File: "changed.txt", Line: 1, Title: "second", Rationale: "r", Resolution: verdict.Resolution{Kind: verdict.ResolutionWrong, Reason: "evidence"}},
+	}})
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--plain", "--fake-verdict", responsePath, "--prior-verdict", first, "--prior-verdict", second}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "resolved: 2 finding(s) from a prior verdict, not counted") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestRunRejectsAPriorVerdictInsideTheRepositoryOrMissing(t *testing.T) {
+	repo := initMainRepository(t)
+	writeMainChange(t, repo)
+	responsePath := cleanResponseFixture(t, repo)
+	inside := filepath.Join(repo, "prior.json")
+	if err := os.WriteFile(inside, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, priorPath := range []string{inside, filepath.Join(t.TempDir(), "missing.json")} {
+		var stdout, stderr bytes.Buffer
+		if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath, "--prior-verdict", priorPath}, &stdout, &stderr); exitCode != 1 {
+			t.Fatalf("%s: exit code = %d, stderr = %s", priorPath, exitCode, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "ROAST-PRIOR-VERDICT") {
+			t.Fatalf("%s: stderr = %s", priorPath, stderr.String())
+		}
+	}
+}
+
+func TestRunTagsAPreExistingFindingAndKeepsTheVerdictRaw(t *testing.T) {
+	repo := initMainRepository(t)
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\nappended\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provenance := testProvenance(t, repo)
+	responsePath := filepath.Join(t.TempDir(), "response.json")
+	writeVerdictFixture(t, responsePath, verdict.Verdict{
+		Overall: verdict.OverallRaw,
+		Findings: []verdict.Finding{
+			{Priority: verdict.PriorityP1, File: "base.txt", Line: 1, Title: "old line", Rationale: "r"},
+			{Priority: verdict.PriorityP1, File: "base.txt", Line: 2, Title: "new line", Rationale: "r"},
+		},
+		Provenance: provenance,
+	})
+	verdictPath := filepath.Join(t.TempDir(), "verdict.json")
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath, "--json-output", verdictPath}, &stdout, &stderr); exitCode != 1 {
+		t.Fatalf("exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "RAW. Fix 2 finding(s)") || !strings.Contains(stderr.String(), "P1 base.txt:1: old line\n  rationale: r\n  pre-existing: line 1 of base.txt was last changed before the reviewed change\n") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "line 2 of base.txt was last changed") {
+		t.Fatalf("the appended line is the change's own: %s", stderr.String())
+	}
+	decoded, err := verdict.DecodePrior(mustRead(t, verdictPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.Findings[0].PreExisting || decoded.Findings[1].PreExisting || decoded.Overall != verdict.OverallRaw {
+		t.Fatalf("verdict = %#v", decoded)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content
+}
