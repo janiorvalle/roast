@@ -133,3 +133,20 @@ func output(t *testing.T, repo string, args ...string) string {
 	}
 	return string(out)
 }
+
+func TestTagLeavesADeletedOldSideLineUntaggedWithANotice(t *testing.T) {
+	repo := fixture(t)
+	write(t, repo, "lib.go", "line one\nline three\n")
+	git(t, repo, "commit", "-qam", "delete line two")
+	reviewTarget, diff := resolve(t, repo, target.Options{Base: "main"})
+	tagged, notices := Tag(context.Background(), reviewTarget, diff, []verdict.Finding{finding("lib.go", 2), finding("lib.go", 1)}, runner.ExecRunner{})
+	if tagged[0].PreExisting {
+		t.Fatalf("a finding on a line this change deleted must not be tagged: %#v", tagged[0])
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "lib.go:2") || !strings.Contains(notices[0], "deleted") {
+		t.Fatalf("notices = %v", notices)
+	}
+	if !tagged[1].PreExisting {
+		t.Fatalf("line one predates the change: %#v", tagged[1])
+	}
+}

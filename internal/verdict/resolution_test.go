@@ -5,11 +5,11 @@ import (
 	"testing"
 )
 
-func TestDecodeRejectsReviewSideFieldsFromTheEngine(t *testing.T) {
-	for _, field := range []string{`"pre_existing": true`, `"resolution": {"kind": "wrong", "reason": "no"}`} {
+func TestDecodeRejectsReviewSideFieldsFromTheEngineEvenWhenZeroValued(t *testing.T) {
+	for _, field := range []string{`"pre_existing": true`, `"pre_existing": false`, `"resolution": {"kind": "wrong", "reason": "no"}`, `"resolution": {}`, `"resolution": null`} {
 		raw := `{"overall":"raw","findings":[{"priority":"P1","file":"a.go","line":1,"title":"t","rationale":"r",` + field + `}],"provenance":{"target":"t","branch":"b","tree":"x","engine":"e","context":"c"}}`
 		_, err := Decode([]byte(raw))
-		if err == nil || !strings.Contains(err.Error(), "ROAST-VERDICT-SCHEMA") || !strings.Contains(err.Error(), "review-side") {
+		if err == nil || !strings.Contains(err.Error(), "ROAST-VERDICT-SCHEMA") || !strings.Contains(err.Error(), "return only priority, file, line, title, rationale, and suggestion") {
 			t.Fatalf("field %s: err = %v", field, err)
 		}
 	}
@@ -138,5 +138,20 @@ func TestDiffAddedFilesNamesOnlyNewPaths(t *testing.T) {
 	added := DiffAddedFiles([]byte(diff))
 	if _, ok := added["new.go"]; !ok || len(added) != 1 {
 		t.Fatalf("added = %v", added)
+	}
+}
+
+func TestDiffDeletedLinesNamesOldSideLineNumbers(t *testing.T) {
+	diff := "diff --git a/f.go b/f.go\n--- a/f.go\n+++ b/f.go\n@@ -1,5 +1,4 @@\n a\n-b\n c\n-d\n+e\n f\n" +
+		"diff --git a/g.go b/g.go\ndeleted file mode 100644\n--- a/g.go\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-x\n-y\n"
+	deleted := DiffDeletedLines([]byte(diff))
+	if _, ok := deleted["f.go"][2]; !ok {
+		t.Fatalf("deleted = %v", deleted)
+	}
+	if _, ok := deleted["f.go"][4]; !ok {
+		t.Fatalf("deleted = %v", deleted)
+	}
+	if len(deleted["f.go"]) != 2 || len(deleted["g.go"]) != 2 {
+		t.Fatalf("deleted = %v", deleted)
 	}
 }
