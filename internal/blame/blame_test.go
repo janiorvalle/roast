@@ -190,3 +190,21 @@ func TestTagLeavesCommittedLinesUntaggedWithANoticeWhenADirtyReviewHasNoBase(t *
 		t.Fatalf("notices = %v", notices)
 	}
 }
+
+func TestTagInADirtyReviewTreatsLinesTheBranchCommitsDeletedAsAmbiguous(t *testing.T) {
+	repo := fixture(t)
+	write(t, repo, "lib.go", "line one\nline three\n")
+	git(t, repo, "commit", "-qam", "task deletes line two")
+	write(t, repo, "lib.go", "line one\nline three\nuncommitted\n")
+	reviewTarget, diff := resolve(t, repo, target.Options{Dirty: true})
+	tagged, notices := Tag(context.Background(), reviewTarget, diff, []verdict.Finding{finding("lib.go", 2), finding("lib.go", 1)}, runner.ExecRunner{})
+	if tagged[0].PreExisting {
+		t.Fatalf("line 2 was deleted by a branch commit, so the finding may mean the deleted line: %#v", tagged[0])
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "lib.go:2") || !strings.Contains(notices[0], "deleted") {
+		t.Fatalf("notices = %v", notices)
+	}
+	if !tagged[1].PreExisting {
+		t.Fatalf("line one predates the change: %#v", tagged[1])
+	}
+}

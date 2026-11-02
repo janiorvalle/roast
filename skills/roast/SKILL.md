@@ -41,8 +41,8 @@ becomes part of the reviewed change.
 - **Pre-existing**: the line predates the diff. Roast tags it `pre-existing`
   from git blame against the reviewed base and reports it as an observation
   that never makes the verdict raw, except at P0 (data loss, a crash, a broken
-  build or install, a security exposure), which stays raw. Fix a pre-existing
-  P0; resolve anything else pre-existing with that reason.
+  build or install, a security exposure), which stays raw. A P0 is fixed or
+  shown wrong; resolve anything else pre-existing with that reason.
 - **Out of fence**: real, but on an adjacent surface or at a different
   altitude. Resolve it with a reason and record it where the project tracks
   work; it does not gate.
@@ -61,7 +61,7 @@ finding is left open. Pass the annotated file to every later round with
 `--prior-verdict <path>`, once per round you annotated. A finding that recurs
 with the same file and title comes back tagged resolved, prints in its own
 block, never counts toward raw, and keeps its resolution in the new verdict.
-A pre-existing P0 counts until a resolution says otherwise.
+A P0 is fixed or shown wrong; roast refuses any other resolution kind on it.
 
 ## The loop
 

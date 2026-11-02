@@ -35,6 +35,12 @@ func (resolution Resolution) IsZero() bool {
 	return resolution == Resolution{}
 }
 
+// clears reports whether this resolution may set the finding aside. A P0 is
+// fixed or shown wrong, never set aside as pre-existing or out of fence.
+func (resolution Resolution) clears(finding Finding) bool {
+	return finding.Priority != PriorityP0 || resolution.Kind == ResolutionWrong
+}
+
 // Resolved reports whether a prior verdict's annotation was honored for this
 // finding.
 func (finding Finding) Resolved() bool {
@@ -83,6 +89,9 @@ func DecodePrior(raw []byte) (Verdict, error) {
 		if strings.TrimSpace(finding.Resolution.Reason) == "" {
 			return Verdict{}, fmt.Errorf("[ROAST-PRIOR-VERDICT] finding %d has a resolution with an empty reason; write one sentence saying why it is pre-existing, out-of-fence, or wrong", index)
 		}
+		if !finding.Resolution.clears(finding) {
+			return Verdict{}, fmt.Errorf("[ROAST-PRIOR-VERDICT] finding %d is P0 (data loss, a crash, a broken build or install, a security exposure) and is resolved as %s; a P0 is fixed or shown wrong, so its only resolution kind is wrong, with the evidence in the reason", index, finding.Resolution.Kind)
+		}
 	}
 	if err := ValidateWithLocations(prior, nil, nil, nil); err != nil {
 		return Verdict{}, fmt.Errorf("[ROAST-PRIOR-VERDICT] %w", err)
@@ -92,7 +101,8 @@ func DecodePrior(raw []byte) (Verdict, error) {
 
 // CarryResolutions copies a resolution from the first prior verdict holding a
 // resolved finding with the same file and title onto each current finding,
-// then settles the outcome from the findings still open. Matching ignores
+// a P0 taking only a wrong resolution, then settles the outcome from the
+// findings still open. Matching ignores
 // case, whitespace, and trailing punctuation in the title, and ignores the
 // line, since fixes move lines between rounds. A reworded title does not
 // match and comes back open, so the agent resolves it once more.
@@ -111,7 +121,7 @@ func CarryResolutions(current Verdict, prior ...Verdict) Verdict {
 func priorResolution(finding Finding, prior []Verdict) (Resolution, bool) {
 	for _, priorVerdict := range prior {
 		for _, candidate := range priorVerdict.Findings {
-			if candidate.Resolved() && candidate.File == finding.File && titleKey(candidate.Title) == titleKey(finding.Title) {
+			if candidate.Resolved() && candidate.Resolution.clears(finding) && candidate.File == finding.File && titleKey(candidate.Title) == titleKey(finding.Title) {
 				return candidate.Resolution, true
 			}
 		}

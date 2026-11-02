@@ -242,29 +242,52 @@ func resolveAuto(ctx context.Context, repoDir string, git runner.Runner) (Target
 		return Target{}, prErr
 	}
 
-	for _, candidate := range []string{"origin/main", "origin/master", "main", "master"} {
-		baseSHA, refErr := tryResolveRef(ctx, repoDir, candidate, git)
-		if refErr != nil {
-			continue
-		}
-		headSHA, headErr := resolveRef(ctx, repoDir, "HEAD", git)
-		if headErr != nil {
-			return Target{}, headErr
-		}
-		return Target{
-			Kind:         KindBase,
-			RepoDir:      repoDir,
-			BaseRef:      candidate,
-			HeadRef:      "HEAD",
-			BaseSHA:      baseSHA,
-			HeadSHA:      headSHA,
-			SnapshotRef:  headSHA,
-			Range:        candidate + "...HEAD",
-			ThreeDotDiff: true,
-		}, nil
+	base, err := BranchBase(ctx, repoDir, git)
+	if errors.Is(err, ErrNoBranchBase) {
+		return Target{}, fmt.Errorf("[ROAST-TARGET-AUTO] no current PR or local base branch found; fetch origin/main or use --base <ref>, --commit <ref>, or --dirty")
 	}
+	if err != nil {
+		return Target{}, err
+	}
+	headSHA, err := resolveRef(ctx, repoDir, "HEAD", git)
+	if err != nil {
+		return Target{}, err
+	}
+	return Target{
+		Kind:         KindBase,
+		RepoDir:      repoDir,
+		BaseRef:      base.Ref,
+		HeadRef:      "HEAD",
+		BaseSHA:      base.SHA,
+		HeadSHA:      headSHA,
+		SnapshotRef:  headSHA,
+		Range:        base.Ref + "...HEAD",
+		ThreeDotDiff: true,
+	}, nil
+}
 
-	return Target{}, fmt.Errorf("[ROAST-TARGET-AUTO] no current PR or local base branch found; fetch origin/main or use --base <ref>, --commit <ref>, or --dirty")
+// BranchBaseCandidates are the refs a branch is assumed to grow from, tried
+// in order, when no base is named.
+var BranchBaseCandidates = []string{"origin/main", "origin/master", "main", "master"}
+
+var ErrNoBranchBase = errors.New("none of " + strings.Join(BranchBaseCandidates, ", ") + " exists locally")
+
+// Base is a resolved branch base: the candidate ref that exists and its commit.
+type Base struct {
+	Ref string
+	SHA string
+}
+
+// BranchBase returns the first candidate base ref that exists locally, or
+// ErrNoBranchBase when none does.
+func BranchBase(ctx context.Context, repoDir string, git runner.Runner) (Base, error) {
+	for _, candidate := range BranchBaseCandidates {
+		sha, err := tryResolveRef(ctx, repoDir, candidate, git)
+		if err == nil {
+			return Base{Ref: candidate, SHA: sha}, nil
+		}
+	}
+	return Base{}, ErrNoBranchBase
 }
 
 type pullRequestMetadata struct {
