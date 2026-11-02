@@ -74,7 +74,8 @@ func TestCarryResolutionsMatchesOnFileAndNormalizedTitle(t *testing.T) {
 
 func TestCarryResolutionsSettlesWellDoneWhenEveryFindingIsResolved(t *testing.T) {
 	prior := Verdict{Findings: []Finding{{File: "a.go", Title: "t", Resolution: Resolution{Kind: ResolutionOutOfFence, Reason: "belongs to task 2"}}}}
-	current := Verdict{Overall: OverallRaw, Findings: []Finding{{Priority: PriorityP1, File: "a.go", Line: 1, Title: "t", Rationale: "r"}}}
+	provenance := Provenance{Target: "t", Branch: "b", Tree: "x", Engine: "e", Context: "c"}
+	current := Verdict{Overall: OverallRaw, Findings: []Finding{{Priority: PriorityP1, File: "a.go", Line: 1, Title: "t", Rationale: "r"}}, Provenance: provenance}
 	carried := CarryResolutions(current, prior)
 	if carried.Overall != OverallWellDone || !carried.Findings[0].Resolved() {
 		t.Fatalf("carried = %#v", carried)

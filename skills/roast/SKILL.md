@@ -15,11 +15,11 @@ Run `roast` as the independent ship gate after implementing a change.
 - Treat findings as claims. Verify every finding against the real code and the
   current diff before fixing it.
 - Fix verified defects only. Do not blindly apply a review suggestion.
-- Run the review again after each fix round.
-- Continue the fix -> review loop until the verdict is `well done`.
+- Never pass `--max-priority`. The threshold belongs to the human and the
+  default is theirs.
 - Run the full check suite once after the review is clean.
 
-## Scope governor
+## The fence
 
 Roast is a ship gate, not permission to rewrite the task.
 
@@ -36,41 +36,40 @@ becomes part of the reviewed change.
 
 **Classify every verified finding against the fence:**
 
-- **In-scope blocker** — introduced by this diff, affects the same owner
-  boundary, fixable without changing the task's contract. Fix it; it gates.
-- **Follow-up** — real, but belongs to an adjacent surface, cleanup, or
-  broader hardening. Record it where the project tracks work and move on; it
-  does not gate and it does not re-enter the loop.
-- **Stop-and-escalate** — requires a new contract, API shape, migration,
-  storage change, different owner boundary, or a design decision beyond the
-  original request. Correct-in-a-vacuum architecture at the wrong altitude
-  lands here. Stop and bring it to the humans; do not fix it quietly, and do
-  not relitigate it with the reviewer round after round.
+- **In-scope blocker**: introduced by this diff, inside the owner boundary,
+  fixable without changing the task's contract. Fix it; it gates.
+- **Pre-existing**: the line predates the diff. Roast tags it `pre-existing`
+  from git blame against the reviewed base. Resolve it with that reason; fix it
+  only when it is data loss, a crash, a broken build or install, or a concrete
+  security exposure.
+- **Out of fence**: real, but on an adjacent surface or at a different
+  altitude. Resolve it with a reason and record it where the project tracks
+  work; it does not gate.
+- **Wrong**: resolve it with the evidence.
+- **Needs a design call**: a new contract, API shape, migration, or owner
+  boundary. Stop and bring it to the humans instead of relitigating it with the
+  reviewer.
 
-**Convergence tripwires:**
+## Pass resolutions back
 
-- Two fix rounds without converging → pause and reclassify every remaining
-  finding against the fence before another edit.
-- The diff grows past 2x the original files or non-test lines → scope broke;
-  stop and say so instead of continuing.
+Write each round's verdict with `--json-output <path>`, outside the
+repository. For every finding you set aside, add a `resolution` to that
+finding in the file, with a `kind` of `pre-existing`, `out-of-fence`, or
+`wrong` and a one-sentence `reason`, and set `overall` to `well_done` when no
+finding is left open. Pass the annotated file to every later round with
+`--prior-verdict <path>`, once per round you annotated. A finding that recurs
+with the same file and title comes back tagged resolved, prints in its own
+block, never counts toward raw, and keeps its resolution in the new verdict.
+A finding roast tags `pre-existing` is still counted until a resolution says
+otherwise.
 
-**Only these may expand the fence:** active data loss, a crash, broken
-build/install, or a concrete security exposure. A finding that is none of
-those is never critical enough to grow the task.
+## The loop
 
-- Work only on defects introduced by the current task or made worse by it.
-- Do not expand the change into unrelated refactors, style work, or speculative
-  hardening.
-- A finding outside the diff needs a concrete failure path before it changes
-  the task.
-
-## Loop until clean
-
-1. Freeze the scope fence to its file, run the fast gates, then run
-   `roast --intent-file <path>` on the current change.
-2. Read each finding and verify its failure path in the repository.
-3. Classify each verified finding against the fence; fix in-scope blockers
-   only, keeping the patch within the scope governor.
-4. Repeat from step 1 (skipping the freeze, passing the same intent file)
-   until `roast` reports `well done` with no unrecorded follow-ups.
-5. Run the full check suite once and attach its real output as evidence.
+The loop itself, delta-only rounds after round one, and resolving with a
+reason, live in the harness's `land-pr` skill, so the two never drift. In
+short: freeze the fence, run the fast gates, run round one on the whole
+change with the intent file, verify and classify every finding, fix in-scope
+blockers only, annotate the verdict, then run `roast --dirty` with the same
+intent file and the annotated verdicts on each fix until roast says well done
+or every open finding carries a reason. Only a design call stops the loop;
+the fence, never a round count, is what bounds it.

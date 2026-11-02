@@ -18,13 +18,18 @@ const (
 	PriorityP3 Priority = "P3"
 )
 
+// Finding is one defect the engine reported. PreExisting and Resolution are
+// review-side: roast sets the first from git blame and copies the second from
+// a prior verdict the agent annotated. The engine never returns either.
 type Finding struct {
-	Priority   Priority `json:"priority"`
-	File       string   `json:"file"`
-	Line       int      `json:"line"`
-	Title      string   `json:"title"`
-	Rationale  string   `json:"rationale"`
-	Suggestion string   `json:"suggestion,omitempty"`
+	Priority    Priority   `json:"priority"`
+	File        string     `json:"file"`
+	Line        int        `json:"line"`
+	Title       string     `json:"title"`
+	Rationale   string     `json:"rationale"`
+	Suggestion  string     `json:"suggestion,omitempty"`
+	PreExisting bool       `json:"pre_existing,omitempty"`
+	Resolution  Resolution `json:"resolution,omitzero"`
 }
 
 type Provenance struct {

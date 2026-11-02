@@ -12,8 +12,25 @@ import (
 )
 
 // Decode strictly parses one engine response. Unknown fields and trailing
-// JSON are rejected so a model cannot quietly change the review contract.
+// JSON are rejected so a model cannot quietly change the review contract, and
+// so are the review-side fields roast alone may set.
 func Decode(raw []byte) (Verdict, error) {
+	verdict, err := decodeEnvelope(raw, "engine response")
+	if err != nil {
+		return Verdict{}, err
+	}
+	for index, finding := range verdict.Findings {
+		if finding.PreExisting || finding.Resolved() {
+			return Verdict{}, fmt.Errorf("[ROAST-VERDICT-SCHEMA] finding %d carries a review-side field (pre_existing or resolution); return only priority, file, line, title, rationale, and suggestion", index)
+		}
+	}
+	if err := ValidateWithLocations(verdict, nil, nil, nil); err != nil {
+		return Verdict{}, err
+	}
+	return verdict, nil
+}
+
+func decodeEnvelope(raw []byte, source string) (Verdict, error) {
 	var envelope struct {
 		Overall    *Overall    `json:"overall"`
 		Findings   *[]Finding  `json:"findings"`
@@ -22,14 +39,14 @@ func Decode(raw []byte) (Verdict, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&envelope); err != nil {
-		return Verdict{}, fmt.Errorf("[ROAST-VERDICT-JSON] engine response is not valid verdict JSON: %w; return one JSON object matching the schema", err)
+		return Verdict{}, fmt.Errorf("[ROAST-VERDICT-JSON] %s is not valid verdict JSON: %w; return one JSON object matching the schema", source, err)
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		if err == nil {
-			return Verdict{}, fmt.Errorf("[ROAST-VERDICT-JSON] engine response contains more than one JSON value; return exactly one verdict object")
+			return Verdict{}, fmt.Errorf("[ROAST-VERDICT-JSON] %s contains more than one JSON value; return exactly one verdict object", source)
 		}
-		return Verdict{}, fmt.Errorf("[ROAST-VERDICT-JSON] engine response has trailing invalid JSON: %w; return exactly one verdict object", err)
+		return Verdict{}, fmt.Errorf("[ROAST-VERDICT-JSON] %s has trailing invalid JSON: %w; return exactly one verdict object", source, err)
 	}
 	if envelope.Overall == nil {
 		return Verdict{}, fmt.Errorf("[ROAST-VERDICT-SCHEMA] missing required field overall; return overall as well_done or raw")
@@ -40,11 +57,7 @@ func Decode(raw []byte) (Verdict, error) {
 	if envelope.Provenance == nil {
 		return Verdict{}, fmt.Errorf("[ROAST-VERDICT-SCHEMA] missing required field provenance; return target, branch, tree, engine, and context")
 	}
-	verdict := Verdict{Overall: *envelope.Overall, Findings: *envelope.Findings, Provenance: *envelope.Provenance}
-	if err := ValidateWithLocations(verdict, nil, nil, nil); err != nil {
-		return Verdict{}, err
-	}
-	return verdict, nil
+	return Verdict{Overall: *envelope.Overall, Findings: *envelope.Findings, Provenance: *envelope.Provenance}, nil
 }
 
 // ValidateWithLocations validates snapshot lines and the old/new ranges named
@@ -91,11 +104,12 @@ func ValidateWithLocations(reviewVerdict Verdict, snapshotFiles map[string]struc
 			}
 		}
 	}
-	if reviewVerdict.Overall == OverallWellDone && len(reviewVerdict.Findings) > 0 {
-		return fmt.Errorf("[ROAST-VERDICT-SCHEMA] overall is well_done but findings is not empty; use raw when any finding remains")
+	open := openFindings(reviewVerdict.Findings)
+	if reviewVerdict.Overall == OverallWellDone && open > 0 {
+		return fmt.Errorf("[ROAST-VERDICT-SCHEMA] overall is well_done but %d finding(s) are open; use raw when any open finding remains", open)
 	}
-	if reviewVerdict.Overall == OverallRaw && len(reviewVerdict.Findings) == 0 {
-		return fmt.Errorf("[ROAST-VERDICT-SCHEMA] overall is raw but findings is empty; use well_done when no finding remains")
+	if reviewVerdict.Overall == OverallRaw && open == 0 {
+		return fmt.Errorf("[ROAST-VERDICT-SCHEMA] overall is raw but no finding is open; use well_done when no open finding remains")
 	}
 	return nil
 }
@@ -139,6 +153,25 @@ func DiffFiles(diff []byte) map[string]struct{} {
 		}
 	}
 	return files
+}
+
+// DiffAddedFiles returns the paths a unified Git diff creates, so a finding on
+// a new file is never blamed against history it does not have.
+func DiffAddedFiles(diff []byte) map[string]struct{} {
+	added := make(map[string]struct{})
+	fromNull := false
+	for _, line := range strings.Split(string(diff), "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			fromNull = false
+		case strings.HasPrefix(line, "--- "):
+			fromNull = strings.TrimSuffix(strings.TrimPrefix(line, "--- "), "\t") == "/dev/null"
+		case fromNull && strings.HasPrefix(line, "+++ "):
+			addDiffPath(strings.TrimSuffix(strings.TrimPrefix(line, "+++ "), "\t"), "b/", added)
+			fromNull = false
+		}
+	}
+	return added
 }
 
 type LineRange struct {
@@ -415,8 +448,8 @@ func countLinesReader(reader io.Reader) (int, error) {
 	return lines, nil
 }
 
-// Filter removes findings below the configured threshold and recalculates the
-// gate outcome from the findings that remain.
+// Filter removes findings below the configured threshold and settles the
+// gate outcome from the open findings that remain.
 func Filter(reviewVerdict Verdict, maximum Priority) (Verdict, error) {
 	if !maximum.Valid() {
 		return Verdict{}, fmt.Errorf("[ROAST-PRIORITY] maximum priority %q is invalid; expected P0, P1, P2, or P3", maximum)
@@ -428,11 +461,7 @@ func Filter(reviewVerdict Verdict, maximum Priority) (Verdict, error) {
 		}
 	}
 	reviewVerdict.Findings = filtered
-	reviewVerdict.Overall = OverallWellDone
-	if len(filtered) > 0 {
-		reviewVerdict.Overall = OverallRaw
-	}
-	return reviewVerdict, nil
+	return Settle(reviewVerdict), nil
 }
 
 // Encode writes the stable JSON representation used by --json-output.

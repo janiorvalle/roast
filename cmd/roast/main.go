@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/janiorvalle/roast"
+	"github.com/janiorvalle/roast/internal/blame"
 	"github.com/janiorvalle/roast/internal/bundle"
 	"github.com/janiorvalle/roast/internal/engine"
 	"github.com/janiorvalle/roast/internal/output"
@@ -108,6 +109,8 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 	extraPrompt := flags.String("extra-prompt", "", "append extra review guidance to the prompt")
 	intentText := flags.String("intent", "", "the task's intent; the review is judged against this frame")
 	intentFile := flags.String("intent-file", "", "read the task's intent from this file (outside the repository)")
+	var priorVerdictPaths pathList
+	flags.Var(&priorVerdictPaths, "prior-verdict", "an earlier verdict JSON annotated with a resolution per finding (outside the repository); repeatable")
 	showVersion := flags.Bool("version", false, "print the version")
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -247,6 +250,11 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 		jsonOutputPath = checkedPath
 	}
 	reviewIntent, err := resolveIntent(*intentText, *intentFile, reviewTarget.RepoDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "roast: %v\n", err)
+		return 1
+	}
+	priorVerdicts, err := readPriorVerdicts(priorVerdictPaths, reviewTarget.RepoDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "roast: %v\n", err)
 		return 1
@@ -407,7 +415,9 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 		fmt.Fprintf(stderr, "roast: %v\n", err)
 		return 1
 	}
-	mergedVerdict := verdict.Merge(chunkVerdicts, provenanceForChange(provenance, chunks))
+	changeProvenance := provenanceForChange(provenance, chunks)
+	changeProvenance.Context += priorVerdicts.provenance()
+	mergedVerdict := verdict.Merge(chunkVerdicts, changeProvenance)
 	if err := verdict.ValidateWithLocations(mergedVerdict, snapshotFiles, lineCounts, diffRanges); err != nil {
 		fmt.Fprintf(stderr, "roast: %v\n", err)
 		return 1
@@ -417,6 +427,12 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, dependencies r
 		fmt.Fprintf(stderr, "roast: %v\n", err)
 		return 1
 	}
+	taggedFindings, blameNotices := blame.Tag(ctx, reviewTarget, reviewBundle.Diff, filteredVerdict.Findings, commands)
+	for _, notice := range blameNotices {
+		fmt.Fprintf(stderr, "roast: %s\n", displayProvenanceValue(notice))
+	}
+	filteredVerdict.Findings = taggedFindings
+	filteredVerdict = verdict.CarryResolutions(filteredVerdict, priorVerdicts.verdicts...)
 	if jsonOutputPath != "" {
 		encoded, encodeErr := verdict.Encode(filteredVerdict)
 		if encodeErr != nil {
@@ -604,6 +620,61 @@ func provenanceForChange(base verdict.Provenance, chunks []prompt.DiffChunk) ver
 		base.Context += "; chunks=" + prompt.ChunkSummary(chunks)
 	}
 	return base
+}
+
+// pathList collects a repeatable path flag.
+type pathList []string
+
+func (paths *pathList) String() string {
+	return strings.Join(*paths, ", ")
+}
+
+func (paths *pathList) Set(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("[ROAST-PRIOR-VERDICT] --prior-verdict is empty; pass the path of a verdict roast wrote with --json-output")
+	}
+	*paths = append(*paths, value)
+	return nil
+}
+
+// priorVerdicts are the earlier rounds' verdicts, annotated by the agent, with
+// the digest of each file for the provenance of the verdict they shape.
+type priorVerdicts struct {
+	verdicts []verdict.Verdict
+	digests  []string
+}
+
+// readPriorVerdicts reads each annotated verdict from outside the repository.
+func readPriorVerdicts(paths []string, repoDir string) (priorVerdicts, error) {
+	prior := priorVerdicts{}
+	for _, pathValue := range paths {
+		checkedPath, err := checkedRepositoryArtifact(pathValue, repoDir, "prior verdict")
+		if err != nil {
+			return priorVerdicts{}, err
+		}
+		content, err := os.ReadFile(checkedPath)
+		if err != nil {
+			return priorVerdicts{}, fmt.Errorf("[ROAST-PRIOR-VERDICT] cannot read prior verdict %q: %w; pass the path of a verdict roast wrote with --json-output", pathValue, err)
+		}
+		decoded, err := verdict.DecodePrior(content)
+		if err != nil {
+			return priorVerdicts{}, fmt.Errorf("%w (in %q)", err, pathValue)
+		}
+		digest := sha256.Sum256(content)
+		prior.verdicts = append(prior.verdicts, decoded)
+		prior.digests = append(prior.digests, "sha256:"+hex.EncodeToString(digest[:]))
+	}
+	return prior, nil
+}
+
+// provenance names the prior verdicts whose resolutions were honored, so a
+// verdict never hides what settled it.
+func (prior priorVerdicts) provenance() string {
+	var named strings.Builder
+	for _, digest := range prior.digests {
+		named.WriteString("; prior-verdict=" + digest)
+	}
+	return named.String()
 }
 
 func chunkError(err error, chunk prompt.DiffChunk) error {
