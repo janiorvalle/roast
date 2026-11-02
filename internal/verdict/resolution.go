@@ -52,9 +52,17 @@ func (finding Finding) Open() bool {
 // with a resolution per finding it set aside. Review-side fields are allowed
 // here and nowhere else.
 func DecodePrior(raw []byte) (Verdict, error) {
-	prior, err := decodeEnvelope(raw, "prior verdict")
+	envelope, err := decodeEnvelope(raw, "prior verdict")
 	if err != nil {
 		return Verdict{}, fmt.Errorf("[ROAST-PRIOR-VERDICT] %w; pass the JSON roast wrote with --json-output, with a resolution per finding you set aside", err)
+	}
+	prior := Verdict{Overall: envelope.overall, Findings: make([]Finding, 0, len(envelope.findings)), Provenance: envelope.provenance}
+	for index, rawFinding := range envelope.findings {
+		var finding Finding
+		if err := decodeClosed(rawFinding, &finding); err != nil {
+			return Verdict{}, fmt.Errorf("[ROAST-PRIOR-VERDICT] finding %d is not a verdict finding: %w; keep the fields roast wrote and add only resolution with kind and reason", index, err)
+		}
+		prior.Findings = append(prior.Findings, finding)
 	}
 	for index, finding := range prior.Findings {
 		if finding.Resolution.IsZero() {

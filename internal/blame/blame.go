@@ -18,25 +18,35 @@ const uncommittedLine = "0000000000000000000000000000000000000000"
 // finding pre-existing when the commit that last changed the line is outside
 // the reviewed range: before the base for a branch or PR, another commit for a
 // commit review, or already committed for a dirty review. A line on a file the
-// diff adds is the change's own and is not blamed. A line blame cannot
-// resolve, such as a deleted line, stays untagged and is named in a notice, so
-// doubt never hides a defect.
+// diff adds is the change's own and is not blamed. A finding's line has no
+// side, so when the post-change line at a number predates the change but the
+// diff deleted the old line of that number, the finding may mean the deleted
+// line; it stays untagged. So does a line blame cannot resolve. Both are named
+// in a notice, so doubt never hides a defect.
 func Tag(ctx context.Context, reviewTarget target.Target, diff []byte, findings []verdict.Finding, commands runner.Runner) ([]verdict.Finding, []string) {
 	inRange, err := changeCommits(ctx, reviewTarget, commands)
 	if err != nil {
 		return findings, []string{fmt.Sprintf("[ROAST-BLAME] cannot list the reviewed commits: %v; findings are reported without a pre-existing tag", err)}
 	}
 	added := verdict.DiffAddedFiles(diff)
+	deleted := verdict.DiffDeletedLines(diff)
 	tagged := make([]verdict.Finding, 0, len(findings))
 	notices := make([]string, 0)
 	for _, finding := range findings {
-		if _, isNew := added[finding.File]; !isNew {
-			commit, err := lineCommit(ctx, reviewTarget, finding, commands)
-			if err != nil {
-				notices = append(notices, fmt.Sprintf("[ROAST-BLAME] cannot blame %s:%d: %v; the finding is reported without a pre-existing tag", finding.File, finding.Line, err))
-			} else {
-				finding.PreExisting = !inRange(commit)
-			}
+		if _, isNew := added[finding.File]; isNew {
+			tagged = append(tagged, finding)
+			continue
+		}
+		commit, err := lineCommit(ctx, reviewTarget, finding, commands)
+		_, isDeletedLine := deleted[finding.File][finding.Line]
+		switch {
+		case err != nil:
+			notices = append(notices, fmt.Sprintf("[ROAST-BLAME] cannot blame %s:%d: %v; the finding is reported without a pre-existing tag", finding.File, finding.Line, err))
+		case inRange(commit):
+		case isDeletedLine:
+			notices = append(notices, fmt.Sprintf("[ROAST-BLAME] %s:%d is a line number this change deleted, so the finding may point at the deleted line; it is reported without a pre-existing tag", finding.File, finding.Line))
+		default:
+			finding.PreExisting = true
 		}
 		tagged = append(tagged, finding)
 	}

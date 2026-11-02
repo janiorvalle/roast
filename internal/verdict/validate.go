@@ -13,51 +13,79 @@ import (
 
 // Decode strictly parses one engine response. Unknown fields and trailing
 // JSON are rejected so a model cannot quietly change the review contract, and
-// so are the review-side fields roast alone may set.
+// each finding is read through the closed engine-side shape, so the
+// review-side fields roast alone may set are refused even when zero-valued.
 func Decode(raw []byte) (Verdict, error) {
-	verdict, err := decodeEnvelope(raw, "engine response")
+	envelope, err := decodeEnvelope(raw, "engine response")
 	if err != nil {
 		return Verdict{}, err
 	}
-	for index, finding := range verdict.Findings {
-		if finding.PreExisting || finding.Resolved() {
-			return Verdict{}, fmt.Errorf("[ROAST-VERDICT-SCHEMA] finding %d carries a review-side field (pre_existing or resolution); return only priority, file, line, title, rationale, and suggestion", index)
+	findings := make([]Finding, 0, len(envelope.findings))
+	for index, rawFinding := range envelope.findings {
+		var finding engineFinding
+		if err := decodeClosed(rawFinding, &finding); err != nil {
+			return Verdict{}, fmt.Errorf("[ROAST-VERDICT-SCHEMA] finding %d has a field the engine may not return: %w; return only priority, file, line, title, rationale, and suggestion", index, err)
 		}
+		findings = append(findings, Finding{Priority: finding.Priority, File: finding.File, Line: finding.Line, Title: finding.Title, Rationale: finding.Rationale, Suggestion: finding.Suggestion})
 	}
+	verdict := Verdict{Overall: envelope.overall, Findings: findings, Provenance: envelope.provenance}
 	if err := ValidateWithLocations(verdict, nil, nil, nil); err != nil {
 		return Verdict{}, err
 	}
 	return verdict, nil
 }
 
-func decodeEnvelope(raw []byte, source string) (Verdict, error) {
+// engineFinding is the closed shape an engine returns: Finding without the
+// review-side fields.
+type engineFinding struct {
+	Priority   Priority `json:"priority"`
+	File       string   `json:"file"`
+	Line       int      `json:"line"`
+	Title      string   `json:"title"`
+	Rationale  string   `json:"rationale"`
+	Suggestion string   `json:"suggestion,omitempty"`
+}
+
+type verdictEnvelope struct {
+	overall    Overall
+	findings   []json.RawMessage
+	provenance Provenance
+}
+
+func decodeEnvelope(raw []byte, source string) (verdictEnvelope, error) {
 	var envelope struct {
-		Overall    *Overall    `json:"overall"`
-		Findings   *[]Finding  `json:"findings"`
-		Provenance *Provenance `json:"provenance"`
+		Overall    *Overall           `json:"overall"`
+		Findings   *[]json.RawMessage `json:"findings"`
+		Provenance *Provenance        `json:"provenance"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&envelope); err != nil {
-		return Verdict{}, fmt.Errorf("[ROAST-VERDICT-JSON] %s is not valid verdict JSON: %w; return one JSON object matching the schema", source, err)
+		return verdictEnvelope{}, fmt.Errorf("[ROAST-VERDICT-JSON] %s is not valid verdict JSON: %w; return one JSON object matching the schema", source, err)
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		if err == nil {
-			return Verdict{}, fmt.Errorf("[ROAST-VERDICT-JSON] %s contains more than one JSON value; return exactly one verdict object", source)
+			return verdictEnvelope{}, fmt.Errorf("[ROAST-VERDICT-JSON] %s contains more than one JSON value; return exactly one verdict object", source)
 		}
-		return Verdict{}, fmt.Errorf("[ROAST-VERDICT-JSON] %s has trailing invalid JSON: %w; return exactly one verdict object", source, err)
+		return verdictEnvelope{}, fmt.Errorf("[ROAST-VERDICT-JSON] %s has trailing invalid JSON: %w; return exactly one verdict object", source, err)
 	}
 	if envelope.Overall == nil {
-		return Verdict{}, fmt.Errorf("[ROAST-VERDICT-SCHEMA] missing required field overall; return overall as well_done or raw")
+		return verdictEnvelope{}, fmt.Errorf("[ROAST-VERDICT-SCHEMA] missing required field overall; return overall as well_done or raw")
 	}
 	if envelope.Findings == nil {
-		return Verdict{}, fmt.Errorf("[ROAST-VERDICT-SCHEMA] missing required field findings; return an array, even when it is empty")
+		return verdictEnvelope{}, fmt.Errorf("[ROAST-VERDICT-SCHEMA] missing required field findings; return an array, even when it is empty")
 	}
 	if envelope.Provenance == nil {
-		return Verdict{}, fmt.Errorf("[ROAST-VERDICT-SCHEMA] missing required field provenance; return target, branch, tree, engine, and context")
+		return verdictEnvelope{}, fmt.Errorf("[ROAST-VERDICT-SCHEMA] missing required field provenance; return target, branch, tree, engine, and context")
 	}
-	return Verdict{Overall: *envelope.Overall, Findings: *envelope.Findings, Provenance: *envelope.Provenance}, nil
+	return verdictEnvelope{overall: *envelope.Overall, findings: *envelope.Findings, provenance: *envelope.Provenance}, nil
+}
+
+func decodeClosed(raw json.RawMessage, into any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(into)
 }
 
 // ValidateWithLocations validates snapshot lines and the old/new ranges named
@@ -153,6 +181,45 @@ func DiffFiles(diff []byte) map[string]struct{} {
 		}
 	}
 	return files
+}
+
+// DiffDeletedLines returns, per path, the old-side line numbers a unified Git
+// diff removes. A finding's line has no side, so a finding on one of these
+// numbers may mean the deleted line, not the post-change line that now holds
+// the same number.
+func DiffDeletedLines(diff []byte) map[string]map[int]struct{} {
+	deleted := make(map[string]map[int]struct{})
+	oldPath := ""
+	oldLine := 0
+	inHunk := false
+	for _, line := range strings.Split(string(diff), "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			oldPath, _, _ = diffHeaderPaths(line[len("diff --git "):])
+			inHunk = false
+		case !inHunk && strings.HasPrefix(line, "--- "):
+			oldPath, _ = cleanDiffPath(strings.TrimSuffix(strings.TrimPrefix(line, "--- "), "\t"), "a/")
+		case strings.HasPrefix(line, "@@ "):
+			oldStart, _, _, _, ok := parseHunkHeader(line)
+			inHunk = ok
+			oldLine = oldStart
+		case inHunk && strings.HasPrefix(line, "-"):
+			if oldPath != "" {
+				if deleted[oldPath] == nil {
+					deleted[oldPath] = make(map[int]struct{})
+				}
+				deleted[oldPath][oldLine] = struct{}{}
+			}
+			oldLine++
+		case inHunk && (strings.HasPrefix(line, " ") || line == ""):
+			oldLine++
+		case inHunk && strings.HasPrefix(line, "\\"):
+		case inHunk && strings.HasPrefix(line, "+"):
+		default:
+			inHunk = false
+		}
+	}
+	return deleted
 }
 
 // DiffAddedFiles returns the paths a unified Git diff creates, so a finding on
