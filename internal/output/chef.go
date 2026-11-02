@@ -11,27 +11,54 @@ import (
 
 // Print writes the human-facing gate result. Plain mode keeps the same
 // information while removing the chef voice for CI logs. Open findings come
-// first and set the outcome; findings resolved in a prior verdict follow in
-// their own block so the agent sees the resolution was honored.
+// first and set the outcome; pre-existing observations and findings resolved
+// in a prior verdict follow in their own blocks so the agent sees what was
+// set aside and why.
 func Print(writer io.Writer, reviewVerdict verdict.Verdict, plain bool) error {
-	open, resolved := splitFindings(reviewVerdict.Findings)
+	open, observations, resolved := splitFindings(reviewVerdict.Findings)
 	if err := printOpen(writer, open, plain); err != nil {
+		return err
+	}
+	if err := printObservations(writer, observations, plain); err != nil {
 		return err
 	}
 	return printResolved(writer, resolved, plain)
 }
 
-func splitFindings(findings []verdict.Finding) ([]verdict.Finding, []verdict.Finding) {
+func splitFindings(findings []verdict.Finding) ([]verdict.Finding, []verdict.Finding, []verdict.Finding) {
 	open := make([]verdict.Finding, 0, len(findings))
+	observations := make([]verdict.Finding, 0)
 	resolved := make([]verdict.Finding, 0)
 	for _, finding := range findings {
-		if finding.Open() {
+		switch {
+		case finding.Open():
 			open = append(open, finding)
-		} else {
+		case finding.Observation():
+			observations = append(observations, finding)
+		default:
 			resolved = append(resolved, finding)
 		}
 	}
-	return open, resolved
+	return open, observations, resolved
+}
+
+func printObservations(writer io.Writer, observations []verdict.Finding, plain bool) error {
+	if len(observations) == 0 {
+		return nil
+	}
+	if plain {
+		if _, err := fmt.Fprintf(writer, "observations: %d pre-existing finding(s), not counted\n", len(observations)); err != nil {
+			return err
+		}
+	} else if _, err := fmt.Fprintf(writer, "Pre-existing, reported as observations, not counted (%d):\n", len(observations)); err != nil {
+		return err
+	}
+	for _, finding := range observations {
+		if err := printFinding(writer, finding); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func printOpen(writer io.Writer, open []verdict.Finding, plain bool) error {

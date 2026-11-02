@@ -41,11 +41,20 @@ func (finding Finding) Resolved() bool {
 	return !finding.Resolution.IsZero()
 }
 
-// Open reports whether a finding still gates the change. A pre-existing
-// finding stays open until the human rules otherwise; that ruling is this one
-// line.
+// Open reports whether a finding still gates the change. By the human's
+// ruling a pre-existing finding is an observation and never raw, except data
+// loss, a crash, a broken build or install, or a security exposure, which stay
+// raw. P0 is the prompt's class for those four plus a change that does not do
+// what it claims, which is the change's own defect wherever blame puts it, so
+// P0 gates whatever the tag says.
 func (finding Finding) Open() bool {
-	return !finding.Resolved()
+	return !finding.Resolved() && (!finding.PreExisting || finding.Priority == PriorityP0)
+}
+
+// Observation reports whether a finding is reported only for the agent's
+// information: pre-existing, below P0, and not resolved.
+func (finding Finding) Observation() bool {
+	return !finding.Resolved() && !finding.Open()
 }
 
 // DecodePrior parses a verdict roast wrote earlier, annotated by the agent

@@ -87,8 +87,10 @@ Two things keep a long review loop from re-arguing old findings. Every
 finding carries a `pre_existing` tag when git blame says its line was last
 changed before the reviewed change: before the base for a branch or PR, in
 another commit for a commit review, or already committed for `--dirty`. A
-tagged finding still counts; it tells the agent which findings the task
-didn't cause. And a verdict written with `--json-output` can be annotated, a
+tagged finding is reported as an observation in its own block and never makes
+the verdict raw, except at P0, which stays raw: data loss, a crash, a broken
+build or install, a security exposure, or a change that does not do what it
+claims, which is the change's own wherever blame puts it. And a verdict written with `--json-output` can be annotated, a
 `resolution` per finding with a `kind` of `pre-existing`, `out-of-fence`, or
 `wrong` and a `reason`, then passed back with `--prior-verdict`, repeatable
 for several rounds. A finding that recurs with the same file and title comes

@@ -435,7 +435,7 @@ func TestRunFakeEngineFiltersAndFailsOnIncludedFinding(t *testing.T) {
 	writeVerdictFixture(t, responsePath, verdict.Verdict{
 		Overall: verdict.OverallRaw,
 		Findings: []verdict.Finding{
-			{Priority: verdict.PriorityP1, File: "base.txt", Line: 1, Title: "real defect", Rationale: "the input reaches a wrong result"},
+			{Priority: verdict.PriorityP1, File: "changed.txt", Line: 1, Title: "real defect", Rationale: "the input reaches a wrong result"},
 		},
 		Provenance: provenance,
 	})
@@ -444,7 +444,7 @@ func TestRunFakeEngineFiltersAndFailsOnIncludedFinding(t *testing.T) {
 	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 1 {
 		t.Fatalf("raw exit code = %d, stdout = %s, stderr = %s", exitCode, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "RAW.") || !strings.Contains(stderr.String(), "P1 base.txt:1: real defect") {
+	if !strings.Contains(stderr.String(), "RAW.") || !strings.Contains(stderr.String(), "P1 changed.txt:1: real defect") {
 		t.Fatalf("stderr = %s", stderr.String())
 	}
 }
