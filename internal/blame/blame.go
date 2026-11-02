@@ -101,9 +101,11 @@ func changeCommits(ctx context.Context, reviewTarget target.Target, commands run
 }
 
 // dirtyChangeCommits treats the uncommitted lines and every commit on the
-// branch since its base as the change, and the lines deleted between the base
-// and the worktree as the change's deletions. The base comes from the same
-// candidates auto mode tries; without one, committed lines stay untagged.
+// branch since its base as the change, and the lines deleted between the
+// branch's fork point from that base and the worktree as the change's
+// deletions, so edits the base made after the fork never count. The base
+// comes from the same candidates auto mode tries; without one, committed
+// lines stay untagged.
 func dirtyChangeCommits(ctx context.Context, reviewTarget target.Target, commands runner.Runner) (changeMembership, error) {
 	base, err := target.BranchBase(ctx, reviewTarget.RepoDir, commands)
 	if errors.Is(err, target.ErrNoBranchBase) {
@@ -119,15 +121,26 @@ func dirtyChangeCommits(ctx context.Context, reviewTarget target.Target, command
 	if err != nil {
 		return changeMembership{}, err
 	}
-	args := []string{"diff", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", base.SHA, "--"}
-	result, err := commands.Run(ctx, reviewTarget.RepoDir, "git", args...)
+	forkPoint, err := gitOutput(ctx, reviewTarget.RepoDir, commands, "merge-base", base.SHA, reviewTarget.BaseSHA)
 	if err != nil {
 		return changeMembership{}, err
 	}
-	if result.ExitCode != 0 {
-		return changeMembership{}, runner.Failure("git", args, result)
+	branchDiff, err := gitOutput(ctx, reviewTarget.RepoDir, commands, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", strings.TrimSpace(forkPoint), "--")
+	if err != nil {
+		return changeMembership{}, err
 	}
-	return changeMembership{uncommitted: true, commits: commits, baseKnown: true, deletedLines: verdict.DiffDeletedLines(result.Stdout)}, nil
+	return changeMembership{uncommitted: true, commits: commits, baseKnown: true, deletedLines: verdict.DiffDeletedLines([]byte(branchDiff))}, nil
+}
+
+func gitOutput(ctx context.Context, repoDir string, commands runner.Runner, args ...string) (string, error) {
+	result, err := commands.Run(ctx, repoDir, "git", args...)
+	if err != nil {
+		return "", err
+	}
+	if result.ExitCode != 0 {
+		return "", runner.Failure("git", args, result)
+	}
+	return string(result.Stdout), nil
 }
 
 func mergeDeleted(first, second map[string]map[int]struct{}) map[string]map[int]struct{} {
