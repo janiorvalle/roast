@@ -33,7 +33,7 @@ func Tag(ctx context.Context, reviewTarget target.Target, diff []byte, findings 
 		return findings, []string{fmt.Sprintf("[ROAST-BLAME] cannot list the reviewed commits: %v; findings are reported without a pre-existing tag", err)}
 	}
 	added := verdict.DiffAddedFiles(diff)
-	deleted := verdict.DiffDeletedLines(diff)
+	deleted := mergeDeleted(verdict.DiffDeletedLines(diff), change.deletedLines)
 	tagged := make([]verdict.Finding, 0, len(findings))
 	notices := make([]string, 0)
 	if change.notice != "" {
@@ -63,12 +63,15 @@ func Tag(ctx context.Context, reviewTarget target.Target, diff []byte, findings 
 
 // changeMembership says which commits belong to the reviewed change. When
 // baseKnown is false only uncommitted lines are known to belong, and nothing
-// else can be called pre-existing.
+// else can be called pre-existing. deletedLines holds the old-side lines the
+// change removed beyond what the reviewed diff shows: in a dirty review, the
+// lines the branch's own commits deleted.
 type changeMembership struct {
-	uncommitted bool
-	commits     map[string]struct{}
-	baseKnown   bool
-	notice      string
+	uncommitted  bool
+	commits      map[string]struct{}
+	baseKnown    bool
+	notice       string
+	deletedLines map[string]map[int]struct{}
 }
 
 func (change changeMembership) includes(commit string) bool {
@@ -98,7 +101,8 @@ func changeCommits(ctx context.Context, reviewTarget target.Target, commands run
 }
 
 // dirtyChangeCommits treats the uncommitted lines and every commit on the
-// branch since its base as the change. The base comes from the same
+// branch since its base as the change, and the lines deleted between the base
+// and the worktree as the change's deletions. The base comes from the same
 // candidates auto mode tries; without one, committed lines stay untagged.
 func dirtyChangeCommits(ctx context.Context, reviewTarget target.Target, commands runner.Runner) (changeMembership, error) {
 	base, err := target.BranchBase(ctx, reviewTarget.RepoDir, commands)
@@ -115,7 +119,30 @@ func dirtyChangeCommits(ctx context.Context, reviewTarget target.Target, command
 	if err != nil {
 		return changeMembership{}, err
 	}
-	return changeMembership{uncommitted: true, commits: commits, baseKnown: true}, nil
+	args := []string{"diff", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", base.SHA, "--"}
+	result, err := commands.Run(ctx, reviewTarget.RepoDir, "git", args...)
+	if err != nil {
+		return changeMembership{}, err
+	}
+	if result.ExitCode != 0 {
+		return changeMembership{}, runner.Failure("git", args, result)
+	}
+	return changeMembership{uncommitted: true, commits: commits, baseKnown: true, deletedLines: verdict.DiffDeletedLines(result.Stdout)}, nil
+}
+
+func mergeDeleted(first, second map[string]map[int]struct{}) map[string]map[int]struct{} {
+	merged := make(map[string]map[int]struct{})
+	for _, source := range []map[string]map[int]struct{}{first, second} {
+		for file, lines := range source {
+			if merged[file] == nil {
+				merged[file] = make(map[int]struct{})
+			}
+			for line := range lines {
+				merged[file][line] = struct{}{}
+			}
+		}
+	}
+	return merged
 }
 
 func rangeCommits(ctx context.Context, repoDir, baseSHA, headSHA string, commands runner.Runner) (map[string]struct{}, error) {

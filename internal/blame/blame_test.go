@@ -208,3 +208,17 @@ func TestTagInADirtyReviewTreatsLinesTheBranchCommitsDeletedAsAmbiguous(t *testi
 		t.Fatalf("line one predates the change: %#v", tagged[1])
 	}
 }
+
+func TestTagInADirtyReviewIgnoresEditsTheBaseMadeAfterTheBranchDiverged(t *testing.T) {
+	repo := fixture(t)
+	git(t, repo, "checkout", "-q", "main")
+	write(t, repo, "lib.go", "line one\nline two\nline three upstream\n")
+	git(t, repo, "commit", "-qam", "upstream edits line three")
+	git(t, repo, "checkout", "-q", "task")
+	write(t, repo, "lib.go", "line one\nline two changed\nline three\nuncommitted\n")
+	reviewTarget, diff := resolve(t, repo, target.Options{Dirty: true})
+	tagged, notices := Tag(context.Background(), reviewTarget, diff, []verdict.Finding{finding("lib.go", 3)}, runner.ExecRunner{})
+	if len(notices) != 0 || !tagged[0].PreExisting {
+		t.Fatalf("an upstream-only edit is not the branch's deletion: tagged = %#v, notices = %v", tagged, notices)
+	}
+}
