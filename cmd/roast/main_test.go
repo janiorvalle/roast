@@ -1132,7 +1132,7 @@ func TestRunRejectsAPriorVerdictInsideTheRepositoryOrMissing(t *testing.T) {
 	}
 }
 
-func TestRunTagsAPreExistingFindingAndKeepsTheVerdictRaw(t *testing.T) {
+func TestRunTagsAPreExistingFindingAsAnObservationAndKeepsTheVerdictRawForTheChangesOwn(t *testing.T) {
 	repo := initMainRepository(t)
 	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\nappended\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1152,7 +1152,7 @@ func TestRunTagsAPreExistingFindingAndKeepsTheVerdictRaw(t *testing.T) {
 	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath, "--json-output", verdictPath}, &stdout, &stderr); exitCode != 1 {
 		t.Fatalf("exit code = %d, stderr = %s", exitCode, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "RAW. Fix 2 finding(s)") || !strings.Contains(stderr.String(), "P1 base.txt:1: old line\n  rationale: r\n  pre-existing: line 1 of base.txt was last changed before the reviewed change\n") {
+	if !strings.Contains(stderr.String(), "RAW. Fix 1 finding(s)") || !strings.Contains(stderr.String(), "Pre-existing, reported as observations, not counted (1):\nP1 base.txt:1: old line\n  rationale: r\n  pre-existing: line 1 of base.txt was last changed before the reviewed change\n") {
 		t.Fatalf("stderr = %s", stderr.String())
 	}
 	if strings.Contains(stderr.String(), "line 2 of base.txt was last changed") {
@@ -1164,6 +1164,40 @@ func TestRunTagsAPreExistingFindingAndKeepsTheVerdictRaw(t *testing.T) {
 	}
 	if !decoded.Findings[0].PreExisting || decoded.Findings[1].PreExisting || decoded.Overall != verdict.OverallRaw {
 		t.Fatalf("verdict = %#v", decoded)
+	}
+}
+
+func TestRunAPreExistingP0StaysRawAndAPreExistingP1AloneIsWellDone(t *testing.T) {
+	repo := initMainRepository(t)
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\nappended\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provenance := testProvenance(t, repo)
+	responsePath := filepath.Join(t.TempDir(), "response.json")
+	writeVerdictFixture(t, responsePath, verdict.Verdict{
+		Overall:    verdict.OverallRaw,
+		Findings:   []verdict.Finding{{Priority: verdict.PriorityP1, File: "base.txt", Line: 1, Title: "old logic slip", Rationale: "r"}},
+		Provenance: provenance,
+	})
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "well done - send it.\nPre-existing, reported as observations, not counted (1):\n") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+	writeVerdictFixture(t, responsePath, verdict.Verdict{
+		Overall:    verdict.OverallRaw,
+		Findings:   []verdict.Finding{{Priority: verdict.PriorityP0, File: "base.txt", Line: 1, Title: "old crash", Rationale: "r"}},
+		Provenance: provenance,
+	})
+	stdout.Reset()
+	stderr.Reset()
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath}, &stdout, &stderr); exitCode != 1 {
+		t.Fatalf("exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "RAW. Fix 1 finding(s) before serving this change:\nP0 base.txt:1: old crash\n  rationale: r\n  pre-existing: line 1 of base.txt") {
+		t.Fatalf("stderr = %s", stderr.String())
 	}
 }
 

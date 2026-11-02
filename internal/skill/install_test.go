@@ -239,7 +239,7 @@ func TestBundledSkillNamesNoRoundCapAndNoDiffGrowthStop(t *testing.T) {
 			t.Fatalf("bundled skill still says %q", forbidden)
 		}
 	}
-	for _, required := range []string{"--prior-verdict", "land-pr", "--intent-file"} {
+	for _, required := range []string{"--prior-verdict", "land-pr", "--intent-file", "observation"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("bundled skill does not mention %q", required)
 		}

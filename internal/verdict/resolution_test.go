@@ -108,10 +108,25 @@ func TestFilterKeepsResolvedFindingsOutOfTheOutcome(t *testing.T) {
 	}
 }
 
-func TestPreExistingFindingStaysOpenUntilTheHumanRules(t *testing.T) {
-	finding := Finding{Priority: PriorityP1, File: "a.go", Line: 1, Title: "t", Rationale: "r", PreExisting: true}
-	if !finding.Open() {
-		t.Fatal("a pre-existing finding is tagged, still raw")
+func TestPreExistingFindingIsAnObservationUnlessItIsP0(t *testing.T) {
+	observation := Finding{Priority: PriorityP1, File: "a.go", Line: 1, Title: "t", Rationale: "r", PreExisting: true}
+	if observation.Open() || !observation.Observation() {
+		t.Fatalf("a pre-existing P1 finding is an observation, never raw: %#v", observation)
+	}
+	severe := Finding{Priority: PriorityP0, File: "a.go", Line: 1, Title: "t", Rationale: "r", PreExisting: true}
+	if !severe.Open() || severe.Observation() {
+		t.Fatalf("a pre-existing P0 finding (data loss, crash, broken build, security) stays raw: %#v", severe)
+	}
+	resolved := Finding{Priority: PriorityP0, File: "a.go", Line: 1, Title: "t", Rationale: "r", PreExisting: true, Resolution: Resolution{Kind: ResolutionWrong, Reason: "evidence"}}
+	if resolved.Open() || resolved.Observation() {
+		t.Fatalf("a resolved finding is neither open nor an observation: %#v", resolved)
+	}
+}
+
+func TestSettleIsWellDoneWhenOnlyObservationsRemain(t *testing.T) {
+	settled := Settle(Verdict{Overall: OverallRaw, Findings: []Finding{{Priority: PriorityP1, File: "a.go", Line: 1, Title: "t", Rationale: "r", PreExisting: true}}})
+	if settled.Overall != OverallWellDone {
+		t.Fatalf("settled = %#v", settled)
 	}
 }
 
