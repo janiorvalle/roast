@@ -62,7 +62,7 @@ auto-applied), fixes what's real, reruns until exit 0.
 | 8 | Two engine adapters: **codex** and **claude** | The ones actually in use. Small adapter interface; others can be PRs. No matrix of stub engines. |
 | 9 | **Strict verdict contract**: JSON schema, findings-reference-real-files check, priority threshold (default P1), exit codes | The crown jewel — makes "loop until clean" mechanical instead of vibes. One default, one config file. |
 | 10 | Keep the cheap reliability details: heartbeats, tree-fingerprint staleness check, scope-governor rules in the skill | Tiny cost, real value. Review is a closeout gate, not permission to rewrite the task. |
-| 11 | No persistence: **no findings ledger, no accept/reject recording** | The agent judges findings in conversation, per the skill contract. Keep it simple. |
+| 11 | No persistence: **no findings ledger, no accept/reject recording** | The agent judges findings in conversation, per the skill contract. Keep it simple. Roast still stores nothing: the agent annotates the verdict JSON it already asked for and passes it back with `--prior-verdict`, and roast tags pre-existing lines from git blame at run time. |
 | 12 | Skill ships with the CLI, **< 100 lines** | Contract + loop + scope governor. No path ceremony (binary is on PATH). |
 | 13 | Brand voice: **anonymous furious head chef** | Findings = "RAW." Clean = "well done — send it." Severity as escalating chef fury. Plain mode for CI; theater on stderr only — agents parse the JSON. No real chef's name/likeness/show references. |
 | 14 | Community docs **reused from existing repos** (LICENSE, CONTRIBUTING, SECURITY, CLA language) | Already solved in better-git-review / tokenomnom; copy the pattern, don't re-litigate. |
@@ -80,7 +80,8 @@ auto-applied), fixes what's real, reruns until exit 0.
   generic default-deny mechanism + a `roast mcp suggest <server>` helper that
   drafts the allowlist from MCP readOnly annotations for human approval. Never
   mutation tools, never secret-bearing reads.)
-- **Findings ledger / rejection memory / delta review since last clean.**
+- **Findings ledger / delta review since last clean.** Rejection memory
+  came in as `--prior-verdict`, held by the agent, never by roast.
 - **Review panels** (multiple engines on one bundle).
 - `--paranoid` empty-room mode.
 

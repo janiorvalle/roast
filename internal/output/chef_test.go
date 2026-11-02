@@ -67,3 +67,51 @@ func TestPrintPreservesPathWhitespace(t *testing.T) {
 		t.Fatalf("output = %q", output.String())
 	}
 }
+
+func TestPrintShowsResolvedFindingsInTheirOwnBlockAndStaysWellDone(t *testing.T) {
+	reviewVerdict := verdict.Verdict{Overall: verdict.OverallWellDone, Findings: []verdict.Finding{
+		{Priority: verdict.PriorityP1, File: "a.go", Line: 4, Title: "old finding", Rationale: "reason", Resolution: verdict.Resolution{Kind: verdict.ResolutionOutOfFence, Reason: "belongs to task 2"}},
+	}}
+	var chef bytes.Buffer
+	if err := Print(&chef, reviewVerdict, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(chef.String(), "well done - send it.\n") || !strings.Contains(chef.String(), "Resolved in a prior verdict, not counted (1):\nP1 a.go:4: old finding\n  resolved: out-of-fence: belongs to task 2\n") {
+		t.Fatalf("chef output = %q", chef.String())
+	}
+	var plain bytes.Buffer
+	if err := Print(&plain, reviewVerdict, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(plain.String(), "clean: no findings\n") || !strings.Contains(plain.String(), "resolved: 1 finding(s) from a prior verdict, not counted\nP1 a.go:4: old finding\n  resolved: out-of-fence: belongs to task 2\n") {
+		t.Fatalf("plain output = %q", plain.String())
+	}
+}
+
+func TestPrintCountsOnlyOpenFindingsAndShowsObservationsInTheirOwnBlock(t *testing.T) {
+	reviewVerdict := verdict.Verdict{Overall: verdict.OverallRaw, Findings: []verdict.Finding{
+		{Priority: verdict.PriorityP0, File: "a.go", Line: 1, Title: "old crash", Rationale: "reason", PreExisting: true},
+		{Priority: verdict.PriorityP1, File: "a.go", Line: 2, Title: "resolved one", Rationale: "reason", Resolution: verdict.Resolution{Kind: verdict.ResolutionWrong, Reason: "evidence"}},
+		{Priority: verdict.PriorityP1, File: "a.go", Line: 3, Title: "old logic slip", Rationale: "reason", PreExisting: true},
+	}}
+	var output bytes.Buffer
+	if err := Print(&output, reviewVerdict, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "RAW. Fix 1 finding(s) before serving this change:\nP0 a.go:1: old crash\n  rationale: reason\n  pre-existing: line 1 of a.go was last changed before the reviewed change\n") {
+		t.Fatalf("output = %q", output.String())
+	}
+	if !strings.Contains(output.String(), "Pre-existing, reported as observations, not counted (1):\nP1 a.go:3: old logic slip\n  rationale: reason\n  pre-existing: line 3 of a.go was last changed before the reviewed change\n") {
+		t.Fatalf("output = %q", output.String())
+	}
+	if !strings.Contains(output.String(), "Resolved in a prior verdict, not counted (1):\nP1 a.go:2: resolved one\n") {
+		t.Fatalf("output = %q", output.String())
+	}
+	var plain bytes.Buffer
+	if err := Print(&plain, reviewVerdict, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plain.String(), "observations: 1 pre-existing finding(s), not counted\nP1 a.go:3: old logic slip\n") {
+		t.Fatalf("plain output = %q", plain.String())
+	}
+}

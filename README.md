@@ -77,9 +77,29 @@ per-engine overrides, `--max-priority P0|P1|P2|P3` (default P1),
 `--intent <text>` or `--intent-file <path>` to judge the change against what
 the task asked for (a problem outside the intent is an observation, never a
 finding, and the verdict's provenance names the intent it was judged against),
-`--json-output <path>` for the full verdict as JSON, and `--plain` for CI logs
-without the chef voice. The intent file and the verdict path must both be
-outside the repository so review artifacts never become reviewed source.
+`--json-output <path>` for the full verdict as JSON, `--prior-verdict <path>`
+to pass an earlier verdict back once you've annotated it, and `--plain` for CI
+logs without the chef voice. The intent file, the verdict path, and the prior
+verdict must all be outside the repository so review artifacts never become
+reviewed source.
+
+Two things keep a long review loop from re-arguing old findings. Every
+finding carries a `pre_existing` tag when git blame says its line was last
+changed before the reviewed change: before the base for a branch or PR, in
+another commit for a commit review, or for `--dirty` neither uncommitted nor
+on the branch since its base (origin/main, origin/master, main, or master,
+whichever exists; with none, committed lines get no tag and a notice). A
+tagged finding is reported as an observation in its own block and never makes
+the verdict raw, except at P0, which stays raw: data loss, a crash, a broken
+build or install, a security exposure, or a change that does not do what it
+claims, which is the change's own wherever blame puts it. And a verdict written with `--json-output` can be annotated, a
+`resolution` per finding with a `kind` of `pre-existing`, `out-of-fence`, or
+`wrong` and a `reason`, then passed back with `--prior-verdict`, repeatable
+for several rounds; a P0 takes only `wrong`, since a P0 is fixed or shown
+wrong. A finding that recurs with the same file and title comes
+back tagged resolved, prints in its own block, never makes the verdict raw,
+and keeps its resolution in the new verdict's JSON. A reworded title does not
+match and comes back open.
 
 Two things worth knowing up front. Reviews spend tokens through your own CLI
 subscription or API key — that's the deal with an AI reviewer, and roast
@@ -98,10 +118,11 @@ anyway.
 
 The first time roast runs it installs a skill into any Claude Code or Codex
 home it finds (`roast install-skill --force` reinstalls). The skill teaches
-the agent the loop: freeze the task's intent to a file, run the cheap gates,
+the agent the fence: freeze the task's intent to a file, run the cheap gates,
 run roast with that intent every round, treat findings as claims, verify each
-one against the real code before fixing it, and repeat until the verdict is
-well done.
+one against the real code before fixing it, resolve what the task didn't cause
+with a reason, and pass the annotated verdict back. The loop itself lives in
+the agent's own workflow; roast puts no cap on rounds.
 
 TruffleHog scans the full pre- and post-change content before any engine
 runs, and files like `.env` or key stores are excluded from what the reviewer
