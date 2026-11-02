@@ -150,3 +150,43 @@ func TestTagLeavesADeletedOldSideLineUntaggedWithANotice(t *testing.T) {
 		t.Fatalf("line one predates the change: %#v", tagged[1])
 	}
 }
+
+// A dirty review in land-pr's loop sits on top of the task's own commits, so
+// those commits are the change too, not history.
+func TestTagCountsTheBranchCommitsAsTheChangeInADirtyReview(t *testing.T) {
+	repo := fixture(t)
+	write(t, repo, "lib.go", "line one\nline two changed\nline three\nuncommitted fix\n")
+	reviewTarget, diff := resolve(t, repo, target.Options{Dirty: true})
+	tagged, notices := Tag(context.Background(), reviewTarget, diff, []verdict.Finding{finding("lib.go", 1), finding("lib.go", 2), finding("lib.go", 4)}, runner.ExecRunner{})
+	if len(notices) != 0 {
+		t.Fatalf("notices = %v", notices)
+	}
+	if !tagged[0].PreExisting {
+		t.Fatalf("line one is the base's: %#v", tagged[0])
+	}
+	if tagged[1].PreExisting {
+		t.Fatalf("line two is the task's own commit on the branch: %#v", tagged[1])
+	}
+	if tagged[2].PreExisting {
+		t.Fatalf("line four is uncommitted: %#v", tagged[2])
+	}
+}
+
+func TestTagLeavesCommittedLinesUntaggedWithANoticeWhenADirtyReviewHasNoBase(t *testing.T) {
+	repo := t.TempDir()
+	git(t, repo, "init", "-b", "trunk")
+	git(t, repo, "config", "user.email", "test@example.com")
+	git(t, repo, "config", "user.name", "Roast Test")
+	write(t, repo, "lib.go", "line one\n")
+	git(t, repo, "add", "lib.go")
+	git(t, repo, "commit", "-m", "base")
+	write(t, repo, "lib.go", "line one\nuncommitted\n")
+	reviewTarget, diff := resolve(t, repo, target.Options{Dirty: true})
+	tagged, notices := Tag(context.Background(), reviewTarget, diff, []verdict.Finding{finding("lib.go", 1), finding("lib.go", 2)}, runner.ExecRunner{})
+	if tagged[0].PreExisting || tagged[1].PreExisting {
+		t.Fatalf("no base means no tag, never a wrong one: %#v", tagged)
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "ROAST-BLAME") || !strings.Contains(notices[0], "origin/main") {
+		t.Fatalf("notices = %v", notices)
+	}
+}

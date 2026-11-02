@@ -1209,3 +1209,40 @@ func mustRead(t *testing.T, path string) []byte {
 	}
 	return content
 }
+
+func TestRunPriorVerdictClearsAPreExistingP0OnlyWhenShownWrong(t *testing.T) {
+	repo := initMainRepository(t)
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\nappended\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provenance := testProvenance(t, repo)
+	responsePath := filepath.Join(t.TempDir(), "response.json")
+	writeVerdictFixture(t, responsePath, verdict.Verdict{
+		Overall:    verdict.OverallRaw,
+		Findings:   []verdict.Finding{{Priority: verdict.PriorityP0, File: "base.txt", Line: 1, Title: "old crash", Rationale: "r"}},
+		Provenance: provenance,
+	})
+	setAside := filepath.Join(t.TempDir(), "set-aside.json")
+	writeVerdictFixture(t, setAside, verdict.Verdict{Overall: verdict.OverallWellDone, Provenance: provenance, Findings: []verdict.Finding{
+		{Priority: verdict.PriorityP0, File: "base.txt", Line: 1, Title: "old crash", Rationale: "r", PreExisting: true, Resolution: verdict.Resolution{Kind: verdict.ResolutionPreExisting, Reason: "was there before"}},
+	}})
+	var stdout, stderr bytes.Buffer
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath, "--prior-verdict", setAside}, &stdout, &stderr); exitCode != 1 {
+		t.Fatalf("exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "ROAST-PRIOR-VERDICT") || !strings.Contains(stderr.String(), "fixed or shown wrong") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+	shownWrong := filepath.Join(t.TempDir(), "shown-wrong.json")
+	writeVerdictFixture(t, shownWrong, verdict.Verdict{Overall: verdict.OverallWellDone, Provenance: provenance, Findings: []verdict.Finding{
+		{Priority: verdict.PriorityP0, File: "base.txt", Line: 1, Title: "old crash", Rationale: "r", PreExisting: true, Resolution: verdict.Resolution{Kind: verdict.ResolutionWrong, Reason: "the path is unreachable"}},
+	}})
+	stdout.Reset()
+	stderr.Reset()
+	if exitCode := runTest([]string{"--dirty", "--repo", repo, "--engine", "fake", "--fake-verdict", responsePath, "--prior-verdict", shownWrong}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "well done - send it.\nResolved in a prior verdict, not counted (1):\nP0 base.txt:1: old crash") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}

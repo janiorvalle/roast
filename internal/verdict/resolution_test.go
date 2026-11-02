@@ -170,3 +170,25 @@ func TestDiffDeletedLinesNamesOldSideLineNumbers(t *testing.T) {
 		t.Fatalf("deleted = %v", deleted)
 	}
 }
+
+func TestDecodePriorRefusesToSetAsideAP0ExceptAsWrong(t *testing.T) {
+	for _, kind := range []string{"pre-existing", "out-of-fence"} {
+		raw := `{"overall":"well_done","findings":[{"priority":"P0","file":"a.go","line":1,"title":"t","rationale":"r","pre_existing":true,"resolution":{"kind":"` + kind + `","reason":"was there before"}}],"provenance":{"target":"t","branch":"b","tree":"x","engine":"e","context":"c"}}`
+		_, err := DecodePrior([]byte(raw))
+		if err == nil || !strings.Contains(err.Error(), "ROAST-PRIOR-VERDICT") || !strings.Contains(err.Error(), "fixed or shown wrong") {
+			t.Fatalf("%s: err = %v", kind, err)
+		}
+	}
+	raw := `{"overall":"well_done","findings":[{"priority":"P0","file":"a.go","line":1,"title":"t","rationale":"r","pre_existing":true,"resolution":{"kind":"wrong","reason":"the path is unreachable"}}],"provenance":{"target":"t","branch":"b","tree":"x","engine":"e","context":"c"}}`
+	if _, err := DecodePrior([]byte(raw)); err != nil {
+		t.Fatalf("wrong must still clear a P0: %v", err)
+	}
+}
+
+func TestCarryResolutionsAppliesOnlyWrongToAP0(t *testing.T) {
+	prior := Verdict{Findings: []Finding{{Priority: PriorityP1, File: "a.go", Title: "t", Resolution: Resolution{Kind: ResolutionOutOfFence, Reason: "task 2"}}}}
+	current := Verdict{Overall: OverallRaw, Findings: []Finding{{Priority: PriorityP0, File: "a.go", Line: 1, Title: "t", Rationale: "r", PreExisting: true}}}
+	if carried := CarryResolutions(current, prior); carried.Findings[0].Resolved() || carried.Overall != OverallRaw {
+		t.Fatalf("a prior out-of-fence on the same title must not clear a P0: %#v", carried)
+	}
+}
